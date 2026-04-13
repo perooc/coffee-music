@@ -2,14 +2,14 @@
 
 import { useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
-import type { QueueItem, Table, Order, SocketEvents } from "@/types";
+import type { SocketEvents } from "@coffee-bar/shared";
 
 // ─── Singleton ────────────────────────────────────────────────────────────────
 let socket: Socket | null = null;
 
 function getSocket(): Socket {
   if (!socket) {
-    socket = io(process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001", {
+    socket = io(process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://localhost:3001", {
       transports: ["websocket"],
       autoConnect: false,
     });

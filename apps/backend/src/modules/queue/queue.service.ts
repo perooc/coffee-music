@@ -3,6 +3,7 @@ import { Prisma, QueueStatus, TableStatus } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { CreateQueueItemDto } from "./dto/create-queue-item.dto";
+import { MAX_SONGS_PER_TABLE, MAX_SONG_DURATION_SECONDS } from "@coffee-bar/shared";
 
 const queueInclude = {
   song: true,
@@ -20,6 +21,9 @@ export class QueueService {
 
   async findGlobal() {
     const items = await this.prisma.queueItem.findMany({
+      where: {
+        status: { in: [QueueStatus.pending, QueueStatus.playing] },
+      },
       include: queueInclude,
       orderBy: [{ position: "asc" }],
     });
@@ -31,6 +35,7 @@ export class QueueService {
     const items = await this.prisma.queueItem.findMany({
       where: {
         table_id: tableId,
+        status: { in: [QueueStatus.pending, QueueStatus.playing] },
       },
       include: queueInclude,
       orderBy: [{ position: "asc" }],
@@ -70,11 +75,40 @@ export class QueueService {
       throw new BadRequestException("Table must be active to add songs to the queue");
     }
 
-    const maxPosition = await this.prisma.queueItem.aggregate({
-      _max: {
-        position: true,
+    // Validate duration
+    if (duration <= 0) {
+      throw new BadRequestException("Song duration must be greater than 0");
+    }
+    if (duration > MAX_SONG_DURATION_SECONDS) {
+      throw new BadRequestException(
+        `Song duration exceeds maximum of ${MAX_SONG_DURATION_SECONDS} seconds (${Math.floor(MAX_SONG_DURATION_SECONDS / 60)} minutes)`,
+      );
+    }
+
+    // Validate max songs per table
+    const activeSongsCount = await this.prisma.queueItem.count({
+      where: {
+        table_id,
+        status: { in: [QueueStatus.pending, QueueStatus.playing] },
       },
     });
+    if (activeSongsCount >= MAX_SONGS_PER_TABLE) {
+      throw new BadRequestException(
+        `Table already has ${MAX_SONGS_PER_TABLE} songs in queue`,
+      );
+    }
+
+    // Validate no duplicate pending song by same table
+    const duplicatePending = await this.prisma.queueItem.findFirst({
+      where: {
+        table_id,
+        status: { in: [QueueStatus.pending, QueueStatus.playing] },
+        song: { youtube_id },
+      },
+    });
+    if (duplicatePending) {
+      throw new BadRequestException("This song is already in your queue");
+    }
 
     const song = await this.findOrCreateSong({
       youtube_id,
@@ -83,15 +117,28 @@ export class QueueService {
       table_id,
     });
 
-    const queueItem = await this.prisma.queueItem.create({
-      data: {
-        song_id: song.id,
-        table_id,
-        priority_score: 0,
-        status: QueueStatus.pending,
-        position: (maxPosition._max.position ?? 0) + 1,
-      },
-      include: queueInclude,
+    const queueItem = await this.prisma.$transaction(async (tx) => {
+      const maxPosition = await tx.queueItem.aggregate({
+        where: {
+          status: { in: [QueueStatus.pending, QueueStatus.playing] },
+        },
+        _max: { position: true },
+      });
+
+      const item = await tx.queueItem.create({
+        data: {
+          song_id: song.id,
+          table_id,
+          priority_score: 0,
+          status: QueueStatus.pending,
+          position: (maxPosition._max.position ?? 0) + 1,
+        },
+        include: queueInclude,
+      });
+
+      await this.compactPositions(tx);
+
+      return item;
     });
 
     await this.broadcastQueueUpdate();
@@ -100,42 +147,34 @@ export class QueueService {
   }
 
   async playNext() {
-    await this.prisma.queueItem.updateMany({
-      where: {
-        status: QueueStatus.playing,
-      },
-      data: {
-        status: QueueStatus.played,
-      },
-    });
+    const result = await this.prisma.$transaction(async (tx) => {
+      await tx.queueItem.updateMany({
+        where: { status: QueueStatus.playing },
+        data: { status: QueueStatus.played },
+      });
 
-    const nextItem = await this.prisma.queueItem.findFirst({
-      where: {
-        status: QueueStatus.pending,
-      },
-      include: queueInclude,
-      orderBy: {
-        position: "asc",
-      },
-    });
+      const nextItem = await tx.queueItem.findFirst({
+        where: { status: QueueStatus.pending },
+        include: queueInclude,
+        orderBy: { position: "asc" },
+      });
 
-    if (!nextItem) {
-      return null;
-    }
+      if (!nextItem) return null;
 
-    const updatedItem = await this.prisma.queueItem.update({
-      where: {
-        id: nextItem.id,
-      },
-      data: {
-        status: QueueStatus.playing,
-      },
-      include: queueInclude,
+      const updatedItem = await tx.queueItem.update({
+        where: { id: nextItem.id },
+        data: { status: QueueStatus.playing },
+        include: queueInclude,
+      });
+
+      await this.compactPositions(tx);
+
+      return updatedItem;
     });
 
     await this.broadcastQueueUpdate();
 
-    return this.serializeQueueItem(updatedItem);
+    return result ? this.serializeQueueItem(result) : null;
   }
 
   async skip(id: number) {
@@ -150,14 +189,17 @@ export class QueueService {
       throw new NotFoundException(`Queue item with ID ${id} not found`);
     }
 
-    const updatedItem = await this.prisma.queueItem.update({
-      where: {
-        id,
-      },
-      data: {
-        status: QueueStatus.skipped,
-      },
-      include: queueInclude,
+    const updatedItem = await this.prisma.$transaction(async (tx) => {
+      const item = await tx.queueItem.update({
+        where: { id },
+        data: { status: QueueStatus.skipped },
+        include: queueInclude,
+      });
+
+      // Compact positions of remaining pending items
+      await this.compactPositions(tx);
+
+      return item;
     });
 
     await this.broadcastQueueUpdate();
@@ -178,6 +220,21 @@ export class QueueService {
 
   private toNumber(value: Prisma.Decimal | number) {
     return Number(value);
+  }
+
+  private async compactPositions(tx: Prisma.TransactionClient) {
+    const activeItems = await tx.queueItem.findMany({
+      where: { status: { in: [QueueStatus.playing, QueueStatus.pending] } },
+      orderBy: { position: "asc" },
+      select: { id: true },
+    });
+
+    for (let i = 0; i < activeItems.length; i++) {
+      await tx.queueItem.update({
+        where: { id: activeItems[i].id },
+        data: { position: i + 1 },
+      });
+    }
   }
 
   private async broadcastQueueUpdate() {

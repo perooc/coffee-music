@@ -14,4 +14,9 @@ export class TablesController {
   findOne(@Param("id", ParseIntPipe) id: number) {
     return this.tablesService.findOne(id);
   }
+
+  @Get(":id/detail")
+  findOneDetailed(@Param("id", ParseIntPipe) id: number) {
+    return this.tablesService.findOneDetailed(id);
+  }
 }

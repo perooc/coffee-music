@@ -4,7 +4,7 @@ import { useEffect, useCallback } from "react";
 import { useAppStore } from "@/store";
 import { useSocket } from "@/lib/socket/useSocket";
 import { tablesApi, queueApi, ordersApi } from "@/lib/api/services";
-import type { QueueItem, Table, Order } from "@/types";
+import type { QueueItem, Table, Order } from "@coffee-bar/shared";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = (n: number) =>

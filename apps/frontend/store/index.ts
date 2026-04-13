@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { devtools } from "zustand/middleware";
-import type { Table, QueueItem, Order, Product } from "@/types";
+import type { Table, QueueItem, Order, Product } from "@coffee-bar/shared";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface AppStore {

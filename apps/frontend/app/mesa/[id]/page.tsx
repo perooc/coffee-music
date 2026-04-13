@@ -3,8 +3,10 @@
 import { useEffect, use, useCallback } from "react";
 import { useAppStore, selectMyQueueCount } from "@/store";
 import { useSocket } from "@/lib/socket/useSocket";
-import { tablesApi, queueApi, ordersApi, musicApi } from "@/lib/api/services";
-import type { QueueItem, Table, Order } from "@/types";
+import { tablesApi, queueApi, ordersApi } from "@/lib/api/services";
+import type { QueueItem, Table, Order } from "@coffee-bar/shared";
+import { MAX_SONGS_PER_TABLE } from "@coffee-bar/shared";
+import SongSearch from "@/components/music/SongSearch";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = (n: number) =>
@@ -512,22 +514,33 @@ export default function MesaPage({
         >
           <button
             onClick={() => setSearchOpen(true)}
-            disabled={myQueueCount >= 2}
+            disabled={myQueueCount >= MAX_SONGS_PER_TABLE}
             style={{
               width: "100%",
               padding: 16,
-              background: myQueueCount >= 2 ? "#1a1a1a" : "#FFDC32",
+              background: myQueueCount >= MAX_SONGS_PER_TABLE ? "#1a1a1a" : "#FFDC32",
               border: "none",
-              color: myQueueCount >= 2 ? "#383838" : "#0a0a0a",
+              color: myQueueCount >= MAX_SONGS_PER_TABLE ? "#383838" : "#0a0a0a",
               fontFamily: "'Bebas Neue',Impact,sans-serif",
               fontSize: 18,
               letterSpacing: 4,
-              cursor: myQueueCount >= 2 ? "not-allowed" : "pointer",
+              cursor: myQueueCount >= MAX_SONGS_PER_TABLE ? "not-allowed" : "pointer",
             }}
           >
-            {myQueueCount >= 2 ? "LÍMITE DE 2 CANCIONES" : "♪ PEDIR CANCIÓN"}
+            {myQueueCount >= MAX_SONGS_PER_TABLE
+              ? `LÍMITE DE ${MAX_SONGS_PER_TABLE} CANCIONES`
+              : "♪ PEDIR CANCIÓN"}
           </button>
         </div>
+
+        <SongSearch
+          tableId={tableId}
+          open={isSearchOpen}
+          onClose={() => setSearchOpen(false)}
+          onAdded={() => {
+            queueApi.getByTable(tableId).then(updateFromSocket).catch(console.error);
+          }}
+        />
       </div>
     </>
   );

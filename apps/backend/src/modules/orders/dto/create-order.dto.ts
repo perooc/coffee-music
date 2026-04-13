@@ -3,6 +3,7 @@ import {
   IsArray,
   IsInt,
   IsPositive,
+  Max,
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
@@ -14,6 +15,7 @@ class CreateOrderItemDto {
 
   @IsInt()
   @IsPositive()
+  @Max(50)
   quantity!: number;
 }
 

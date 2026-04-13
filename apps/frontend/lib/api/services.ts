@@ -6,7 +6,7 @@ import type {
   Product,
   Song,
   YouTubeSearchResult,
-} from "@/types";
+} from "@coffee-bar/shared";
 
 // ─── Tables ───────────────────────────────────────────────────────────────────
 export const tablesApi = {

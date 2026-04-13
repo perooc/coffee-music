@@ -170,29 +170,87 @@ export class OrdersService {
     return serializedOrder;
   }
 
+  private static readonly VALID_TRANSITIONS: Record<string, string[]> = {
+    pending: ["preparing", "cancelled"],
+    preparing: ["ready", "delivered", "cancelled"],
+    ready: ["delivered"],
+    delivered: [],
+    cancelled: [],
+  };
+
   async updateStatus(id: number, status: OrderStatus) {
     const existingOrder = await this.prisma.order.findUnique({
       where: { id },
+      include: {
+        order_items: true,
+      },
     });
 
     if (!existingOrder) {
       throw new NotFoundException(`Order with ID ${id} not found`);
     }
 
-    const updatedOrder = await this.prisma.order.update({
-      where: { id },
-      data: { status },
-      include: {
-        order_items: {
-          include: {
-            product: true,
+    const allowed = OrdersService.VALID_TRANSITIONS[existingOrder.status] ?? [];
+    if (!allowed.includes(status)) {
+      throw new BadRequestException(
+        `Cannot transition from '${existingOrder.status}' to '${status}'`,
+      );
+    }
+
+    const isCancellation = status === OrderStatus.cancelled;
+
+    const updatedOrder = await this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.update({
+        where: { id },
+        data: { status },
+        include: {
+          order_items: {
+            include: {
+              product: true,
+            },
           },
         },
-      },
+      });
+
+      if (isCancellation) {
+        // Restore stock
+        for (const item of existingOrder.order_items) {
+          await tx.product.update({
+            where: { id: item.product_id },
+            data: {
+              stock: { increment: item.quantity },
+            },
+          });
+        }
+
+        // Subtract from table consumption
+        await tx.table.update({
+          where: { id: existingOrder.table_id },
+          data: {
+            total_consumption: {
+              decrement: this.toNumber(existingOrder.total),
+            },
+          },
+        });
+      }
+
+      return order;
     });
 
     const serializedOrder = this.serializeOrder(updatedOrder);
     this.realtimeGateway.emitOrderUpdated(serializedOrder);
+
+    if (isCancellation) {
+      const freshTable = await this.prisma.table.findUnique({
+        where: { id: existingOrder.table_id },
+      });
+      if (freshTable) {
+        this.realtimeGateway.emitTableUpdated({
+          ...freshTable,
+          total_consumption: this.toNumber(freshTable.total_consumption),
+        });
+      }
+    }
 
     return serializedOrder;
   }

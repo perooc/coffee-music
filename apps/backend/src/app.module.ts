@@ -6,8 +6,9 @@ import { ProductsModule } from "./modules/products/products.module";
 import { QueueModule } from "./modules/queue/queue.module";
 import { RealtimeModule } from "./modules/realtime/realtime.module";
 import { TablesModule } from "./modules/tables/tables.module";
+import { MusicModule } from "./modules/music/music.module";
 
 @Module({
-  imports: [DatabaseModule, HealthModule, OrdersModule, ProductsModule, QueueModule, RealtimeModule, TablesModule],
+  imports: [DatabaseModule, HealthModule, MusicModule, OrdersModule, ProductsModule, QueueModule, RealtimeModule, TablesModule],
 })
 export class AppModule {}

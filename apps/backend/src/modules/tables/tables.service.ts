@@ -68,6 +68,19 @@ export class TablesService {
   async findOne(id: number) {
     const table = await this.prisma.table.findUnique({
       where: { id },
+      include: tableListInclude,
+    });
+
+    if (!table) {
+      throw new NotFoundException(`Table with ID ${id} not found`);
+    }
+
+    return this.serializeTableList(table);
+  }
+
+  async findOneDetailed(id: number) {
+    const table = await this.prisma.table.findUnique({
+      where: { id },
       include: tableDetailInclude,
     });
 
