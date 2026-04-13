@@ -40,6 +40,8 @@ export const queueApi = {
 
 // ─── Orders ───────────────────────────────────────────────────────────────────
 export const ordersApi = {
+  getAll: (): Promise<Order[]> =>
+    api.get<Order[]>("/orders").then((r) => r.data),
   getByTable: (tableId: number): Promise<Order[]> =>
     api.get<Order[]>(`/orders?table_id=${tableId}`).then((r) => r.data),
   create: (payload: {

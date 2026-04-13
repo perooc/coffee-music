@@ -1,7 +1,12 @@
 // ─── Enums ────────────────────────────────────────────────────────────────────
-export type TableStatus = "active" | "inactive" | "closed";
-export type QueueStatus = "pending" | "playing" | "played";
-export type OrderStatus = "pending" | "preparing" | "delivered" | "cancelled";
+export type TableStatus = "available" | "active" | "occupied" | "inactive";
+export type QueueStatus = "pending" | "playing" | "played" | "skipped";
+export type OrderStatus =
+  | "pending"
+  | "preparing"
+  | "ready"
+  | "delivered"
+  | "cancelled";
 
 // ─── Tables ───────────────────────────────────────────────────────────────────
 export interface Table {
@@ -10,6 +15,12 @@ export interface Table {
   status: TableStatus;
   total_consumption: number;
   created_at: string;
+  updated_at?: string;
+  _count?: {
+    orders: number;
+    queue_items: number;
+    songs: number;
+  };
 }
 
 // ─── Music ────────────────────────────────────────────────────────────────────
@@ -29,6 +40,8 @@ export interface QueueItem {
   priority_score: number;
   status: QueueStatus;
   position: number;
+  song?: Song;
+  table?: Table;
 }
 
 // ─── Orders ───────────────────────────────────────────────────────────────────
@@ -45,6 +58,8 @@ export interface OrderItem {
   order_id: number;
   product_id: number;
   quantity: number;
+  unit_price?: number;
+  product?: Product;
 }
 
 export interface Order {
@@ -53,6 +68,8 @@ export interface Order {
   status: OrderStatus;
   total: number;
   created_at: string;
+  updated_at?: string;
+  order_items?: OrderItem[];
 }
 
 // ─── YouTube search ───────────────────────────────────────────────────────────

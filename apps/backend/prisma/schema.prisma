@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TableStatus {
+  available
+  active
+  occupied
+  inactive
+}
+
+enum QueueStatus {
+  pending
+  playing
+  played
+  skipped
+}
+
+enum OrderStatus {
+  pending
+  preparing
+  ready
+  delivered
+  cancelled
+}
+
+model Table {
+  id                Int         @id @default(autoincrement())
+  qr_code           String      @unique
+  status            TableStatus @default(available)
+  total_consumption Decimal     @default(0) @db.Decimal(10, 2)
+  created_at        DateTime    @default(now())
+  updated_at        DateTime    @updatedAt
+  songs             Song[]
+  queue_items       QueueItem[]
+  orders            Order[]
+}
+
+model Song {
+  id                 Int         @id @default(autoincrement())
+  youtube_id         String      @unique
+  title              String
+  duration           Int
+  requested_by_table Int
+  created_at         DateTime    @default(now())
+  table              Table       @relation(fields: [requested_by_table], references: [id], onDelete: Cascade)
+  queue_items        QueueItem[]
+}
+
+model QueueItem {
+  id             Int         @id @default(autoincrement())
+  song_id        Int
+  table_id       Int
+  priority_score Decimal     @default(0) @db.Decimal(10, 2)
+  status         QueueStatus @default(pending)
+  position       Int
+  created_at     DateTime    @default(now())
+  updated_at     DateTime    @updatedAt
+  song           Song        @relation(fields: [song_id], references: [id], onDelete: Cascade)
+  table          Table       @relation(fields: [table_id], references: [id], onDelete: Cascade)
+
+  @@index([status, position])
+  @@index([table_id, status])
+}
+
+model Product {
+  id          Int         @id @default(autoincrement())
+  name        String
+  price       Decimal     @db.Decimal(10, 2)
+  stock       Int         @default(0)
+  category    String
+  created_at  DateTime    @default(now())
+  updated_at  DateTime    @updatedAt
+  order_items OrderItem[]
+}
+
+model Order {
+  id          Int          @id @default(autoincrement())
+  table_id    Int
+  status      OrderStatus  @default(pending)
+  total       Decimal      @default(0) @db.Decimal(10, 2)
+  created_at  DateTime     @default(now())
+  updated_at  DateTime     @updatedAt
+  table       Table        @relation(fields: [table_id], references: [id], onDelete: Cascade)
+  order_items OrderItem[]
+
+  @@index([table_id, status])
+}
+
+model OrderItem {
+  id         Int      @id @default(autoincrement())
+  order_id    Int
+  product_id  Int
+  quantity    Int
+  unit_price  Decimal  @db.Decimal(10, 2)
+  created_at  DateTime @default(now())
+  order       Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product     Product  @relation(fields: [product_id], references: [id], onDelete: Restrict)
+
+  @@index([order_id])
+  @@index([product_id])
+}

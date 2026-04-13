@@ -215,7 +215,7 @@ function QueueRow({
             textOverflow: "ellipsis",
           }}
         >
-          {item.song_id}
+          {item.song?.title ?? item.song_id}
         </div>
         <div
           style={{
@@ -225,7 +225,7 @@ function QueueRow({
             marginTop: 2,
           }}
         >
-          {secToMin(0)} · Mesa {pad(item.table_id)}
+          {secToMin(item.song?.duration ?? 0)} · Mesa {pad(item.table_id)}
         </div>
       </div>
       <div

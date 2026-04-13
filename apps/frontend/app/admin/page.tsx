@@ -17,13 +17,17 @@ const fmt = (n: number) =>
 const pad = (n: number) => String(n).padStart(2, "0");
 
 const statusColor: Record<string, string> = {
+  available: "#3b82f6",
   active: "#22c55e",
   inactive: "#555",
-  closed: "#ef4444",
+  occupied: "#f97316",
   pending: "#FFDC32",
   preparing: "#FF8C00",
+  ready: "#3b82f6",
   delivered: "#22c55e",
   cancelled: "#ef4444",
+  played: "#555",
+  skipped: "#ef4444",
 };
 
 function Badge({ label, status }: { label: string; status: string }) {
@@ -195,7 +199,7 @@ function QueueColumn({ queue }: { queue: QueueItem[] }) {
                   textOverflow: "ellipsis",
                 }}
               >
-                Song #{item.song_id}
+                {item.song?.title ?? `Song #${item.song_id}`}
               </div>
               <div
                 style={{ fontSize: 10, color: "#444", fontFamily: "monospace" }}
@@ -401,6 +405,7 @@ export default function AdminPage() {
   useEffect(() => {
     tablesApi.getAll().then(setAllTables).catch(console.error);
     queueApi.getGlobal().then(updateFromSocket).catch(console.error);
+    ordersApi.getAll().then(setOrders).catch(console.error);
   }, []);
 
   const activeOrders = orders.filter(

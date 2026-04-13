@@ -103,6 +103,10 @@ export const selectNowPlaying = (s: AppStore) => s.nowPlaying;
 export const selectPendingQueue = (s: AppStore) =>
   s.queue.filter((q) => q.status === "pending");
 export const selectMyQueueCount = (tableId: number) => (s: AppStore) =>
-  s.queue.filter((q) => q.table_id === tableId).length;
+  s.queue.filter(
+    (q) =>
+      q.table_id === tableId &&
+      (q.status === "pending" || q.status === "playing"),
+  ).length;
 export const selectTableOrders = (tableId: number) => (s: AppStore) =>
   s.orders.filter((o) => o.table_id === tableId);
