@@ -5,7 +5,7 @@ import { useAppStore, selectMyQueueCount } from "@/store";
 import { useSocket } from "@/lib/socket/useSocket";
 import { tablesApi, queueApi, ordersApi } from "@/lib/api/services";
 import type { QueueItem, Table, Order } from "@coffee-bar/shared";
-import { MAX_SONGS_PER_TABLE } from "@coffee-bar/shared";
+import { MAX_SONGS_PER_TABLE, SCOREBOARD_MAX_CONSUMPTION } from "@coffee-bar/shared";
 import SongSearch from "@/components/music/SongSearch";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ const secToMin = (s: number) => `${Math.floor(s / 60)}:${pad(s % 60)}`;
 
 // ─── Scoreboard ───────────────────────────────────────────────────────────────
 function Scoreboard({ table }: { table: Table }) {
-  const MAX = 120_000;
+  const MAX = SCOREBOARD_MAX_CONSUMPTION;
   const pct = Math.min(100, Math.round((table.total_consumption / MAX) * 100));
 
   return (

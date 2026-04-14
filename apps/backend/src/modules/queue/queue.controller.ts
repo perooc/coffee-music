@@ -40,6 +40,11 @@ export class QueueController {
     return this.queueService.playNext();
   }
 
+  @Post("finish-current")
+  finishCurrent() {
+    return this.queueService.finishCurrent();
+  }
+
   @Patch(":id/skip")
   skip(@Param("id", ParseIntPipe) id: number) {
     return this.queueService.skip(id);

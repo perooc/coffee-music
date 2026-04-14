@@ -52,6 +52,10 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     this.server.emit("table:updated", payload);
   }
 
+  emitPlaybackUpdated(payload: unknown) {
+    this.server.emit("playback:updated", payload);
+  }
+
   private getTableRoom(tableId: number) {
     return `table:${tableId}`;
   }

@@ -10,6 +10,7 @@
     "lint": "eslint \"src/**/*.ts\""
   },
   "dependencies": {
+    "@coffee-bar/shared": "*",
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@nestjs/mapped-types": "^2.1.1",
@@ -22,11 +23,11 @@
     "dotenv": "^17.4.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "ytsr": "^3.8.4",
-    "@coffee-bar/shared": "*"
+    "ytsr": "^3.8.4"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.10",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.7.2",
     "prisma": "^6.7.0",
     "typescript": "^5.9.3"

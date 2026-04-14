@@ -29,6 +29,12 @@ enum OrderStatus {
   cancelled
 }
 
+enum PlaybackStatus {
+  idle
+  playing
+  paused
+}
+
 model Table {
   id                Int         @id @default(autoincrement())
   qr_code           String      @unique
@@ -63,6 +69,7 @@ model QueueItem {
   updated_at     DateTime    @updatedAt
   song           Song        @relation(fields: [song_id], references: [id], onDelete: Cascade)
   table          Table       @relation(fields: [table_id], references: [id], onDelete: Cascade)
+  playback_state PlaybackState?
 
   @@index([status, position])
   @@index([table_id, status])
@@ -104,4 +111,15 @@ model OrderItem {
 
   @@index([order_id])
   @@index([product_id])
+}
+
+model PlaybackState {
+  id               Int            @id @default(autoincrement())
+  status           PlaybackStatus @default(idle)
+  queue_item_id    Int?           @unique
+  started_at       DateTime?
+  position_seconds Int?
+  created_at       DateTime       @default(now())
+  updated_at       DateTime       @updatedAt
+  queue_item       QueueItem?     @relation(fields: [queue_item_id], references: [id], onDelete: SetNull)
 }

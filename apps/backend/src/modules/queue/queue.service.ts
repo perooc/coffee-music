@@ -4,6 +4,7 @@ import { PrismaService } from "../../database/prisma.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { CreateQueueItemDto } from "./dto/create-queue-item.dto";
 import { MAX_SONGS_PER_TABLE, MAX_SONG_DURATION_SECONDS } from "@coffee-bar/shared";
+import { PlaybackService } from "../playback/playback.service";
 
 const queueInclude = {
   song: true,
@@ -17,6 +18,7 @@ export class QueueService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtimeGateway: RealtimeGateway,
+    private readonly playbackService: PlaybackService,
   ) {}
 
   async findGlobal() {
@@ -153,6 +155,8 @@ export class QueueService {
         data: { status: QueueStatus.played },
       });
 
+      await this.compactPositions(tx);
+
       const nextItem = await tx.queueItem.findFirst({
         where: { status: QueueStatus.pending },
         include: queueInclude,
@@ -171,6 +175,12 @@ export class QueueService {
 
       return updatedItem;
     });
+
+    if (result) {
+      await this.playbackService.setFromQueueItem(result);
+    } else {
+      await this.playbackService.setIdle();
+    }
 
     await this.broadcastQueueUpdate();
 
@@ -205,6 +215,33 @@ export class QueueService {
     await this.broadcastQueueUpdate();
 
     return this.serializeQueueItem(updatedItem);
+  }
+
+  async finishCurrent() {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const current = await tx.queueItem.findFirst({
+        where: { status: QueueStatus.playing },
+        include: queueInclude,
+        orderBy: { position: "asc" },
+      });
+
+      if (!current) return null;
+
+      const updated = await tx.queueItem.update({
+        where: { id: current.id },
+        data: { status: QueueStatus.played },
+        include: queueInclude,
+      });
+
+      await this.compactPositions(tx);
+
+      return updated;
+    });
+
+    await this.playbackService.setIdle();
+    await this.broadcastQueueUpdate();
+
+    return result ? this.serializeQueueItem(result) : null;
   }
 
   private serializeQueueItem(item: QueueRecord) {

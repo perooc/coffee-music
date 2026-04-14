@@ -3,6 +3,7 @@ import { PrismaClient, TableStatus } from "@prisma/client";
 const prisma = new PrismaClient();
 
 async function main() {
+  await prisma.playbackState.deleteMany();
   await prisma.orderItem.deleteMany();
   await prisma.order.deleteMany();
   await prisma.queueItem.deleteMany();
@@ -26,6 +27,17 @@ async function main() {
       { name: "Cheesecake", price: 12000, stock: 15, category: "dessert" },
       { name: "Croissant", price: 8000, stock: 20, category: "bakery" },
     ],
+  });
+
+  await prisma.playbackState.upsert({
+    where: { id: 1 },
+    update: {
+      status: "idle",
+      queue_item_id: null,
+      started_at: null,
+      position_seconds: null,
+    },
+    create: { id: 1, status: "idle" },
   });
 }
 
