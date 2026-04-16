@@ -7,6 +7,17 @@ type QueueRecord = Prisma.QueueItemGetPayload<{
   include: { song: true; table: true };
 }>;
 
+type PlaybackRecord = Prisma.PlaybackStateGetPayload<{
+  include: {
+    queue_item: {
+      include: {
+        song: true;
+        table: true;
+      };
+    };
+  };
+}>;
+
 @Injectable()
 export class PlaybackService {
   constructor(
@@ -27,9 +38,18 @@ export class PlaybackService {
         id: 1,
         status: "idle",
       },
+      include: {
+        queue_item: {
+          include: {
+            song: true,
+            table: true,
+          },
+        },
+      },
     });
-    this.realtimeGateway.emitPlaybackUpdated(state);
-    return state;
+    const serialized = this.serializePlaybackState(state);
+    this.realtimeGateway.emitPlaybackUpdated(serialized);
+    return serialized;
   }
 
   async setFromQueueItem(item: QueueRecord) {
@@ -49,9 +69,18 @@ export class PlaybackService {
         started_at: startedAt,
         position_seconds: 0,
       },
+      include: {
+        queue_item: {
+          include: {
+            song: true,
+            table: true,
+          },
+        },
+      },
     });
-    this.realtimeGateway.emitPlaybackUpdated(state);
-    return state;
+    const serialized = this.serializePlaybackState(state);
+    this.realtimeGateway.emitPlaybackUpdated(serialized);
+    return serialized;
   }
 
   async getCurrent() {
@@ -71,6 +100,18 @@ export class PlaybackService {
       return this.setIdle();
     }
 
-    return state;
+    return this.serializePlaybackState(state);
+  }
+
+  private serializePlaybackState(state: PlaybackRecord) {
+    return {
+      status: state.status,
+      queue_item_id: state.queue_item_id,
+      song: state.queue_item?.song ?? null,
+      table_id: state.queue_item?.table_id ?? null,
+      started_at: state.started_at?.toISOString() ?? null,
+      updated_at: state.updated_at.toISOString(),
+      position_seconds: state.position_seconds,
+    };
   }
 }

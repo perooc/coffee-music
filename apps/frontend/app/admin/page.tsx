@@ -3,8 +3,8 @@
 import { useEffect, useCallback } from "react";
 import { useAppStore } from "@/store";
 import { useSocket } from "@/lib/socket/useSocket";
-import { tablesApi, queueApi, ordersApi } from "@/lib/api/services";
-import type { QueueItem, Table, Order } from "@coffee-bar/shared";
+import { tablesApi, queueApi, ordersApi, playbackApi } from "@/lib/api/services";
+import type { QueueItem, Table, Order, PlaybackState } from "@coffee-bar/shared";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = (n: number) =>
@@ -381,6 +381,8 @@ export default function AdminPage() {
     orders,
     setOrders,
     upsertOrder,
+    currentPlayback,
+    setCurrentPlayback,
   } = useAppStore();
 
   const handleQueueUpdated = useCallback(
@@ -395,23 +397,30 @@ export default function AdminPage() {
     (o: Order) => upsertOrder(o),
     [upsertOrder],
   );
+  const handlePlaybackUpdated = useCallback(
+    (playback: PlaybackState) => setCurrentPlayback(playback),
+    [setCurrentPlayback],
+  );
 
   useSocket({
     onQueueUpdated: handleQueueUpdated,
     onTableUpdated: handleTableUpdated,
     onOrderUpdated: handleOrderUpdated,
+    onPlaybackUpdated: handlePlaybackUpdated,
   });
 
   useEffect(() => {
     tablesApi.getAll().then(setAllTables).catch(console.error);
     queueApi.getGlobal().then(updateFromSocket).catch(console.error);
     ordersApi.getAll().then(setOrders).catch(console.error);
+    playbackApi.getCurrent().then(setCurrentPlayback).catch(console.error);
   }, []);
 
   const activeOrders = orders.filter(
     (o) => o.status === "pending" || o.status === "preparing",
   );
   const revenue = allTables.reduce((a, t) => a + t.total_consumption, 0);
+  const isPlaying = currentPlayback?.status === "playing" && currentPlayback.song;
 
   return (
     <>
@@ -480,6 +489,97 @@ export default function AdminPage() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+
+        <div
+          style={{
+            padding: "14px 20px",
+            borderBottom: "1px solid #161616",
+            background: isPlaying ? "rgba(255,220,50,0.06)" : "#0d0d0d",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 16,
+          }}
+        >
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                fontSize: 9,
+                color: "#555",
+                letterSpacing: 2,
+                fontFamily: "monospace",
+                marginBottom: 6,
+              }}
+            >
+              SONANDO AHORA
+            </div>
+            {isPlaying ? (
+              <>
+                <div
+                  style={{
+                    fontFamily: "'Bebas Neue',Impact,sans-serif",
+                    fontSize: 22,
+                    color: "#f5f5f5",
+                    lineHeight: 1.1,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {currentPlayback.song?.title}
+                </div>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: "#777",
+                    fontFamily: "monospace",
+                    marginTop: 4,
+                  }}
+                >
+                  Mesa {pad(currentPlayback.table_id ?? 0)}
+                </div>
+              </>
+            ) : (
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "#444",
+                  fontFamily: "monospace",
+                  letterSpacing: 1,
+                }}
+              >
+                AUN NO HAY UNA CANCION REPRODUCIENDOSE
+              </div>
+            )}
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              color: isPlaying ? "#22c55e" : "#666",
+              flexShrink: 0,
+            }}
+          >
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: isPlaying ? "#22c55e" : "#666",
+              }}
+            />
+            <span
+              style={{
+                fontFamily: "'Bebas Neue',Impact,sans-serif",
+                fontSize: 12,
+                letterSpacing: 2,
+              }}
+            >
+              {isPlaying ? "ACTIVA" : "IDLE"}
+            </span>
           </div>
         </div>
 

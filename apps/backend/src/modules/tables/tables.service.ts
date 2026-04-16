@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma, Table } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { UpdateTableDto } from "./dto/update-table.dto";
 
 const tableListInclude = {
   _count: {
@@ -89,6 +90,18 @@ export class TablesService {
     }
 
     return this.serializeTableDetail(table);
+  }
+
+  async updateStatus(id: number, updateTableDto: UpdateTableDto) {
+    const table = await this.prisma.table.update({
+      where: { id },
+      data: {
+        status: updateTableDto.status,
+      },
+      include: tableListInclude,
+    });
+
+    return this.serializeTableList(table);
   }
 
   private serializeTable(table: Table) {

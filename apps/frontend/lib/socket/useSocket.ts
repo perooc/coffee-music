@@ -40,11 +40,18 @@ interface UseSocketOptions {
   onQueueUpdated?: SocketListener<"queue:updated">;
   onTableUpdated?: SocketListener<"table:updated">;
   onOrderUpdated?: SocketListener<"order:updated">;
+  onPlaybackUpdated?: SocketListener<"playback:updated">;
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 export function useSocket(options: UseSocketOptions = {}) {
-  const { tableId, onQueueUpdated, onTableUpdated, onOrderUpdated } = options;
+  const {
+    tableId,
+    onQueueUpdated,
+    onTableUpdated,
+    onOrderUpdated,
+    onPlaybackUpdated,
+  } = options;
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
@@ -60,13 +67,15 @@ export function useSocket(options: UseSocketOptions = {}) {
     if (onQueueUpdated) s.on("queue:updated", onQueueUpdated);
     if (onTableUpdated) s.on("table:updated", onTableUpdated);
     if (onOrderUpdated) s.on("order:updated", onOrderUpdated);
+    if (onPlaybackUpdated) s.on("playback:updated", onPlaybackUpdated);
 
     return () => {
       if (onQueueUpdated) s.off("queue:updated", onQueueUpdated);
       if (onTableUpdated) s.off("table:updated", onTableUpdated);
       if (onOrderUpdated) s.off("order:updated", onOrderUpdated);
+      if (onPlaybackUpdated) s.off("playback:updated", onPlaybackUpdated);
     };
-  }, [tableId, onQueueUpdated, onTableUpdated, onOrderUpdated]);
+  }, [tableId, onQueueUpdated, onTableUpdated, onOrderUpdated, onPlaybackUpdated]);
 
   // ─── Acciones ─────────────────────────────────────────────────────────────
   const requestSong = useCallback((payload: SocketEvents["song:request"]) => {

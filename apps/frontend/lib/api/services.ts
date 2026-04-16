@@ -5,6 +5,7 @@ import type {
   Order,
   Product,
   Song,
+  PlaybackState,
   YouTubeSearchResult,
 } from "@coffee-bar/shared";
 
@@ -27,6 +28,8 @@ export const queueApi = {
     api.get<QueueItem[]>("/queue/global").then((r) => r.data),
   getByTable: (tableId: number): Promise<QueueItem[]> =>
     api.get<QueueItem[]>(`/queue?table_id=${tableId}`).then((r) => r.data),
+  getCurrent: (): Promise<QueueItem | null> =>
+    api.get<QueueItem | null>("/queue/current").then((r) => r.data),
   addSong: (payload: {
     youtube_id: string;
     title: string;
@@ -36,6 +39,11 @@ export const queueApi = {
     api.post<QueueItem>("/queue", payload).then((r) => r.data),
   skip: (itemId: number): Promise<QueueItem> =>
     api.patch<QueueItem>(`/queue/${itemId}/skip`).then((r) => r.data),
+};
+
+export const playbackApi = {
+  getCurrent: (): Promise<PlaybackState> =>
+    api.get<PlaybackState>("/playback/current").then((r) => r.data),
 };
 
 // ─── Orders ───────────────────────────────────────────────────────────────────

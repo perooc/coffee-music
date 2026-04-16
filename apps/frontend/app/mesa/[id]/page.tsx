@@ -1,11 +1,28 @@
 "use client";
 
 import { useEffect, use, useCallback } from "react";
-import { useAppStore, selectMyQueueCount } from "@/store";
+import {
+  useAppStore,
+  selectCurrentPlayback,
+  selectMyQueueCount,
+} from "@/store";
 import { useSocket } from "@/lib/socket/useSocket";
-import { tablesApi, queueApi, ordersApi } from "@/lib/api/services";
-import type { QueueItem, Table, Order } from "@coffee-bar/shared";
-import { MAX_SONGS_PER_TABLE, SCOREBOARD_MAX_CONSUMPTION } from "@coffee-bar/shared";
+import {
+  tablesApi,
+  queueApi,
+  ordersApi,
+  playbackApi,
+} from "@/lib/api/services";
+import type {
+  QueueItem,
+  Table,
+  Order,
+  PlaybackState,
+} from "@coffee-bar/shared";
+import {
+  MAX_SONGS_PER_TABLE,
+  SCOREBOARD_MAX_CONSUMPTION,
+} from "@coffee-bar/shared";
 import SongSearch from "@/components/music/SongSearch";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -20,10 +37,25 @@ const pad = (n: number) => String(n).padStart(2, "0");
 
 const secToMin = (s: number) => `${Math.floor(s / 60)}:${pad(s % 60)}`;
 
+function buildMesaQueue(tableQueue: QueueItem[], tableId: number) {
+  return tableQueue
+    .filter((item) => item.table_id === tableId && item.status === "pending")
+    .sort((a, b) => a.position - b.position);
+}
+
 // ─── Scoreboard ───────────────────────────────────────────────────────────────
-function Scoreboard({ table }: { table: Table }) {
+function Scoreboard({
+  table,
+  playback,
+}: {
+  table: Table;
+  playback: PlaybackState | null;
+}) {
   const MAX = SCOREBOARD_MAX_CONSUMPTION;
   const pct = Math.min(100, Math.round((table.total_consumption / MAX) * 100));
+  const isPlaying = playback?.status === "playing" && playback.song;
+  const playbackColor = isPlaying ? "#22c55e" : "#666";
+  const playbackLabel = isPlaying ? "SONANDO AHORA" : "SIN REPRODUCCION";
 
   return (
     <div
@@ -82,8 +114,8 @@ function Scoreboard({ table }: { table: Table }) {
               width: 6,
               height: 6,
               borderRadius: "50%",
-              background: "#22c55e",
-              animation: "pulse 2s infinite",
+              background: playbackColor,
+              animation: isPlaying ? "pulse 2s infinite" : "none",
             }}
           />
           <span
@@ -91,10 +123,10 @@ function Scoreboard({ table }: { table: Table }) {
               fontFamily: "'Bebas Neue',Impact,sans-serif",
               fontSize: 10,
               letterSpacing: 2,
-              color: "#22c55e",
+              color: playbackColor,
             }}
           >
-            EN VIVO
+            {playbackLabel}
           </span>
         </div>
       </div>
@@ -165,6 +197,63 @@ function Scoreboard({ table }: { table: Table }) {
             }}
           />
         </div>
+      </div>
+
+      <div
+        style={{
+          marginTop: 16,
+          padding: "10px 12px",
+          border: "1px solid #1a1a1a",
+          background: isPlaying ? "rgba(255,220,50,0.06)" : "#0d0d0d",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 9,
+            color: "#555",
+            letterSpacing: 2,
+            fontFamily: "monospace",
+            marginBottom: 6,
+          }}
+        >
+          SONANDO AHORA
+        </div>
+        {isPlaying ? (
+          <>
+            <div
+              style={{
+                fontFamily: "'Bebas Neue',Impact,sans-serif",
+                fontSize: 16,
+                color: "#f5f5f5",
+                lineHeight: 1.1,
+              }}
+            >
+              {playback.song?.title}
+            </div>
+            <div
+              style={{
+                fontSize: 10,
+                color: "#777",
+                fontFamily: "monospace",
+                marginTop: 4,
+              }}
+            >
+              {secToMin(playback.song?.duration ?? 0)} · Mesa{" "}
+              {pad(playback.table_id ?? 0)}
+            </div>
+          </>
+        ) : (
+          <div
+            style={{
+              fontSize: 10,
+              color: "#444",
+              fontFamily: "monospace",
+              letterSpacing: 1,
+            }}
+          >
+            AUN NO HAY UNA CANCION REPRODUCIENDOSE
+          </div>
+        )}
       </div>
     </div>
   );
@@ -282,13 +371,15 @@ export default function MesaPage({
     activeTab,
     setActiveTab,
     upsertOrder,
+    setCurrentPlayback,
   } = useAppStore();
 
+  const currentPlayback = useAppStore(selectCurrentPlayback);
   const myQueueCount = useAppStore(selectMyQueueCount(tableId));
 
   const handleQueueUpdated = useCallback(
-    (q: QueueItem[]) => updateFromSocket(q),
-    [updateFromSocket],
+    (q: QueueItem[]) => updateFromSocket(buildMesaQueue(q, tableId)),
+    [tableId, updateFromSocket],
   );
   const handleTableUpdated = useCallback(
     (t: Table) => {
@@ -302,20 +393,31 @@ export default function MesaPage({
     },
     [tableId, upsertOrder],
   );
+  const handlePlaybackUpdated = useCallback(
+    (playback: PlaybackState) => setCurrentPlayback(playback),
+    [setCurrentPlayback],
+  );
 
   useSocket({
     tableId,
     onQueueUpdated: handleQueueUpdated,
     onTableUpdated: handleTableUpdated,
     onOrderUpdated: handleOrderUpdated,
+    onPlaybackUpdated: handlePlaybackUpdated,
   });
 
   useEffect(() => {
     if (isNaN(tableId)) return;
     sessionStorage.setItem("table_id", String(tableId));
     tablesApi.getById(tableId).then(setCurrentTable).catch(console.error);
-    queueApi.getByTable(tableId).then(updateFromSocket).catch(console.error);
     ordersApi.getByTable(tableId).then(setOrders).catch(console.error);
+    playbackApi.getCurrent().then(setCurrentPlayback).catch(console.error);
+    queueApi
+      .getByTable(tableId)
+      .then((tableQueue) => {
+        updateFromSocket(buildMesaQueue(tableQueue, tableId));
+      })
+      .catch(console.error);
   }, [tableId]);
 
   const myOrders = orders.filter((o) => o.table_id === tableId);
@@ -378,7 +480,7 @@ export default function MesaPage({
           flexDirection: "column",
         }}
       >
-        <Scoreboard table={currentTable} />
+        <Scoreboard table={currentTable} playback={currentPlayback} />
 
         <div style={{ display: "flex", borderBottom: "1px solid #141414" }}>
           <button style={tabStyle("cola")} onClick={() => setActiveTab("cola")}>
@@ -518,13 +620,16 @@ export default function MesaPage({
             style={{
               width: "100%",
               padding: 16,
-              background: myQueueCount >= MAX_SONGS_PER_TABLE ? "#1a1a1a" : "#FFDC32",
+              background:
+                myQueueCount >= MAX_SONGS_PER_TABLE ? "#1a1a1a" : "#FFDC32",
               border: "none",
-              color: myQueueCount >= MAX_SONGS_PER_TABLE ? "#383838" : "#0a0a0a",
+              color:
+                myQueueCount >= MAX_SONGS_PER_TABLE ? "#383838" : "#0a0a0a",
               fontFamily: "'Bebas Neue',Impact,sans-serif",
               fontSize: 18,
               letterSpacing: 4,
-              cursor: myQueueCount >= MAX_SONGS_PER_TABLE ? "not-allowed" : "pointer",
+              cursor:
+                myQueueCount >= MAX_SONGS_PER_TABLE ? "not-allowed" : "pointer",
             }}
           >
             {myQueueCount >= MAX_SONGS_PER_TABLE
@@ -538,7 +643,12 @@ export default function MesaPage({
           open={isSearchOpen}
           onClose={() => setSearchOpen(false)}
           onAdded={() => {
-            queueApi.getByTable(tableId).then(updateFromSocket).catch(console.error);
+            queueApi
+              .getByTable(tableId)
+              .then((tableQueue) => {
+                updateFromSocket(buildMesaQueue(tableQueue, tableId));
+              })
+              .catch(console.error);
           }}
         />
       </div>

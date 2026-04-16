@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { devtools } from "zustand/middleware";
-import type { Table, QueueItem, Order, Product } from "@coffee-bar/shared";
+import type { Table, QueueItem, Order, Product, PlaybackState } from "@coffee-bar/shared";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface AppStore {
@@ -13,9 +13,10 @@ interface AppStore {
 
   // Queue
   queue: QueueItem[];
-  nowPlaying: QueueItem | null;
+  currentPlayback: PlaybackState | null;
   setQueue: (queue: QueueItem[]) => void;
   updateFromSocket: (queue: QueueItem[]) => void;
+  setCurrentPlayback: (playback: PlaybackState | null) => void;
 
   // Orders
   orders: Order[];
@@ -59,12 +60,12 @@ export const useAppStore = create<AppStore>()(
 
       // Queue
       queue: [],
-      nowPlaying: null,
+      currentPlayback: null,
       setQueue: (queue) => set({ queue }, false, "setQueue"),
-      updateFromSocket: (queue) => {
-        const playing = queue.find((q) => q.status === "playing") ?? null;
-        set({ queue, nowPlaying: playing }, false, "socket:queueUpdated");
-      },
+      updateFromSocket: (queue) =>
+        set({ queue }, false, "socket:queueUpdated"),
+      setCurrentPlayback: (playback) =>
+        set({ currentPlayback: playback }, false, "setCurrentPlayback"),
 
       // Orders
       orders: [],
@@ -99,7 +100,7 @@ export const useAppStore = create<AppStore>()(
 );
 
 // ─── Selectores ───────────────────────────────────────────────────────────────
-export const selectNowPlaying = (s: AppStore) => s.nowPlaying;
+export const selectCurrentPlayback = (s: AppStore) => s.currentPlayback;
 export const selectPendingQueue = (s: AppStore) =>
   s.queue.filter((q) => q.status === "pending");
 export const selectMyQueueCount = (tableId: number) => (s: AppStore) =>
