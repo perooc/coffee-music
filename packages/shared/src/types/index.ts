@@ -103,12 +103,41 @@ export interface PlaybackState {
 export interface Product {
   id: number;
   name: string;
+  description: string | null;
   price: number;
   stock: number;
+  low_stock_threshold: number;
   is_active: boolean;
   category: string;
   created_at: string;
   updated_at: string;
+  // Computed by the API; clients should never recompute themselves.
+  is_low_stock?: boolean;
+  is_out_of_stock?: boolean;
+}
+
+export type InventoryMovementType =
+  | "restock"
+  | "adjustment"
+  | "waste"
+  | "correction";
+
+export interface InventoryMovement {
+  id: number;
+  product_id: number;
+  type: InventoryMovementType;
+  /**
+   * Signed delta applied to Product.stock at recording time.
+   *   restock     > 0
+   *   waste       < 0
+   *   adjustment  != 0
+   *   correction  != 0
+   */
+  quantity: number;
+  reason: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
 }
 
 export interface OrderItem {

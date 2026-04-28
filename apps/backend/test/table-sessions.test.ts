@@ -10,6 +10,8 @@ function makeDeps() {
   const sessionFindUnique = vi.fn();
   const tableUpdate = vi.fn().mockResolvedValue({});
 
+  const orderCount = vi.fn().mockResolvedValue(0);
+
   const tx = {
     tableSession: {
       create: sessionCreate,
@@ -17,6 +19,7 @@ function makeDeps() {
       updateMany: sessionUpdateMany,
     },
     table: { update: tableUpdate },
+    order: { count: orderCount },
   };
 
   const prisma = {

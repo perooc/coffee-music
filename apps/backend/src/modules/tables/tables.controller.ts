@@ -1,8 +1,25 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Patch } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseIntPipe,
+  Patch,
+  UseGuards,
+} from "@nestjs/common";
 import { TablesService } from "./tables.service";
 import { UpdateTableDto } from "./dto/update-table.dto";
+import { JwtGuard } from "../auth/guards/jwt.guard";
+import { AuthKinds } from "../auth/guards/decorators";
 
+/**
+ * Tables surface = staff only. Customers do not need to list tables; they
+ * arrive at /mesa/:id via the QR and read their own table/session there.
+ * Every endpoint requires an admin token.
+ */
 @Controller("tables")
+@UseGuards(JwtGuard)
+@AuthKinds("admin")
 export class TablesController {
   constructor(private readonly tablesService: TablesService) {}
 

@@ -1,4 +1,6 @@
-import { PrismaClient, TableStatus } from "@prisma/client";
+import { PrismaClient, TableStatus, UserRole } from "@prisma/client";
+import * as bcrypt from "bcryptjs";
+import * as jwt from "jsonwebtoken";
 
 const prisma = new PrismaClient();
 
@@ -13,6 +15,7 @@ async function main() {
   await prisma.product.deleteMany();
   await prisma.tableSession.deleteMany();
   await prisma.table.deleteMany();
+  await prisma.user.deleteMany();
 
   await prisma.table.createMany({
     data: [
@@ -42,6 +45,45 @@ async function main() {
     },
     create: { id: 1, status: "idle" },
   });
+
+  // ─── Admin user ────────────────────────────────────────────────────────
+  const adminEmail = (
+    process.env.SEED_ADMIN_EMAIL ?? "admin@cafe.local"
+  ).toLowerCase();
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? "admin123";
+  const passwordHash = await bcrypt.hash(adminPassword, 10);
+  await prisma.user.create({
+    data: {
+      name: "Admin",
+      email: adminEmail,
+      password_hash: passwordHash,
+      role: UserRole.admin,
+      is_active: true,
+    },
+  });
+
+  // ─── Table tokens (print so they can be encoded into QR codes) ─────────
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    console.warn(
+      "[seed] JWT_SECRET missing — table tokens will NOT be generated.",
+    );
+  } else {
+    const tables = await prisma.table.findMany({ orderBy: { number: "asc" } });
+    console.log("\n─── Table QR tokens ────────────────────────────────────");
+    console.log("Encode each into its QR. URL pattern: /mesa/:id?t=<token>");
+    for (const t of tables) {
+      const token = jwt.sign(
+        { kind: "table", table_id: t.id },
+        secret,
+        { expiresIn: "365d" },
+      );
+      console.log(`mesa ${String(t.number).padStart(2, "0")} (id=${t.id}): ${token}`);
+    }
+    console.log("─────────────────────────────────────────────────────────\n");
+  }
+
+  console.log(`[seed] admin login: ${adminEmail} / ${adminPassword}`);
 }
 
 main()

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, use, useCallback, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   useAppStore,
   selectCurrentPlayback,
@@ -17,6 +18,13 @@ import {
   playbackApi,
   productsApi,
 } from "@/lib/api/services";
+import {
+  clearSessionToken,
+  getTableToken,
+  setSessionToken,
+  setTableToken,
+} from "@/lib/auth/token-storage";
+import { registerCustomerAuthFailureHandler } from "@/lib/api/clients";
 import type {
   BillView,
   Order,
@@ -104,6 +112,7 @@ export default function MesaPage({
 }) {
   const { id } = use(params);
   const tableId = parseInt(id, 10);
+  const searchParams = useSearchParams();
   const [globalQueue, setGlobalQueue] = useState<QueueItem[]>([]);
   // `undefined` = still loading; `null` = no open session, render entry view.
   const [session, setSession] = useState<TableSession | null | undefined>(
@@ -112,6 +121,17 @@ export default function MesaPage({
   const [bill, setBill] = useState<BillView | null>(null);
   const [openingSession, setOpeningSession] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  // QR/table token plumbing.
+  //   "checking" — first paint, before we have read the URL/storage.
+  //   "ok"       — we have a table token (from ?t=... or sessionStorage).
+  //   "missing"  — no token anywhere. Show "QR inválido".
+  const [tableTokenStatus, setTableTokenStatus] = useState<
+    "checking" | "ok" | "missing"
+  >("checking");
+  // Set when the customer client gets a 401/403 from the API. The session
+  // token has expired or been revoked; we cannot keep operating, so we render
+  // a recovery card asking the user to scan the QR again.
+  const [sessionInvalid, setSessionInvalid] = useState(false);
   // Session-scoped OrderRequests (mine). Catalog / cart stay separated.
   const [myRequests, setMyRequests] = useState<OrderRequest[]>([]);
   // Catalog: backend-owned, hydrated once. Cart inside modal is local-only.
@@ -139,6 +159,9 @@ export default function MesaPage({
   const myQueueCount = useAppStore(selectMyQueueCount(tableId));
 
   const clearMesaSessionState = useCallback(() => {
+    // Clear ONLY the session token. The table token survives so the same
+    // device can scan-less re-enter the entry view and start a new session.
+    clearSessionToken();
     setSession(null);
     setBill(null);
     setOrders([]);
@@ -159,9 +182,9 @@ export default function MesaPage({
   const hydrateSessionData = useCallback(
     async (sessionToHydrate: TableSession) => {
       const [nextBill, nextOrders, nextRequests] = await Promise.all([
-        billApi.get(sessionToHydrate.id),
-        ordersApi.getAll({ table_session_id: sessionToHydrate.id }),
-        orderRequestsApi.getAll({ table_session_id: sessionToHydrate.id }),
+        billApi.getForSession(sessionToHydrate.id),
+        ordersApi.getAllForSession(sessionToHydrate.id),
+        orderRequestsApi.getAllForSession(sessionToHydrate.id),
       ]);
 
       setBill(nextBill);
@@ -255,9 +278,37 @@ export default function MesaPage({
     onReconnect: handleSocketReconnect,
   });
 
+  // Wire the global customerApi 401/403 handler so any unexpected auth
+  // failure on a session-scoped call surfaces the recovery card instead of
+  // a silent console error.
+  useEffect(() => {
+    registerCustomerAuthFailureHandler(() => setSessionInvalid(true));
+    return () => {
+      registerCustomerAuthFailureHandler(() => {});
+    };
+  }, []);
+
+  // ─── QR table token plumbing ─────────────────────────────────────────────
+  // The QR code links to /mesa/:id?t=<table_token>. We persist the token in
+  // sessionStorage so subsequent navigations within the same tab don't need
+  // the query string. If the URL ships a fresh token we let it overwrite the
+  // stored one (e.g. the bar reprinted the QR with a rotated secret).
+  useEffect(() => {
+    if (isNaN(tableId)) return;
+    const queryToken = searchParams?.get("t");
+    if (queryToken && queryToken.trim()) {
+      setTableToken(queryToken.trim());
+      setTableTokenStatus("ok");
+      return;
+    }
+    const stored = getTableToken();
+    setTableTokenStatus(stored ? "ok" : "missing");
+  }, [tableId, searchParams]);
+
   // Initial load — table + session discovery + playback + queue.
   useEffect(() => {
     if (isNaN(tableId)) return;
+    if (tableTokenStatus !== "ok") return;
     sessionStorage.setItem("table_id", String(tableId));
     tablesApi.getById(tableId).then(setCurrentTable).catch(console.error);
     playbackApi.getCurrent().then(setCurrentPlayback).catch(console.error);
@@ -278,11 +329,19 @@ export default function MesaPage({
       .getCurrentForTable(tableId)
       .then((s) => setSession(s))
       .catch((err) => {
+        const status = (err as { response?: { status?: number } })?.response
+          ?.status;
+        // 401/403 from a customer-side endpoint = the token is no longer
+        // accepted. We surface the recovery card; the user will scan again.
+        if (status === 401 || status === 403) {
+          setSessionInvalid(true);
+          return;
+        }
         console.error(err);
         setSession(null);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tableId]);
+  }, [tableId, tableTokenStatus]);
 
   // When a session is known, fetch session-scoped data (bill + orders + requests).
   useEffect(() => {
@@ -292,7 +351,17 @@ export default function MesaPage({
       setMyRequests([]);
       return;
     }
-    hydrateSessionData(session).catch(console.error);
+    hydrateSessionData(session).catch((err: unknown) => {
+      const status = (err as { response?: { status?: number } })?.response
+        ?.status;
+      if (status === 401 || status === 403) {
+        // Session token expired or revoked while we had a live session.
+        // Surface the recovery card; user must scan the QR again.
+        setSessionInvalid(true);
+        return;
+      }
+      console.error(err);
+    });
   }, [session, setOrders, hydrateSessionData]);
 
   async function handleStartSession() {
@@ -300,8 +369,22 @@ export default function MesaPage({
     setOpeningSession(true);
     try {
       const created = await tableSessionsApi.open(tableId);
-      setSession(created);
+      // Persist the session token BEFORE marking the session as live so that
+      // - subsequent customerApi requests carry the bearer
+      // - the socket's auth callback (re-)resolves to a session token and
+      //   auto-joins tableSession:{id} on reconnect.
+      setSessionToken(created.session_token);
+      const { session_token: _ignored, ...session } = created;
+      void _ignored;
+      setSession(session);
     } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response
+        ?.status;
+      if (status === 401 || status === 403) {
+        // Table token was rejected — likely the secret was rotated.
+        setSessionInvalid(true);
+        return;
+      }
       const msg =
         (err as { response?: { data?: { message?: string } } })?.response?.data
           ?.message ?? "No se pudo iniciar la mesa. Intenta de nuevo.";
@@ -314,8 +397,34 @@ export default function MesaPage({
   const disabled = myQueueCount >= MAX_SONGS_PER_TABLE;
   const orderCreationDisabled = session?.status === "closed";
 
+  // ─── No QR token at all → "QR inválido" ──────────────────────────────────
+  if (tableTokenStatus === "missing") {
+    return (
+      <CustomerErrorCard
+        eyebrow="— Mesa"
+        title="QR inválido"
+        body="No detectamos un código válido para esta mesa. Vuelve a escanear el QR de la mesa para continuar."
+      />
+    );
+  }
+
+  // ─── Token rejected by the server (expired, rotated, revoked) ───────────
+  if (sessionInvalid) {
+    return (
+      <CustomerErrorCard
+        eyebrow="— Sesión"
+        title="Sesión expirada"
+        body="Tu acceso a esta mesa ya no es válido. Por favor escanea el QR de la mesa nuevamente."
+      />
+    );
+  }
+
   // ─── Loading ─────────────────────────────────────────────────────────────
-  if (!currentTable || session === undefined) {
+  if (
+    tableTokenStatus === "checking" ||
+    !currentTable ||
+    session === undefined
+  ) {
     return (
       <div
         style={{
@@ -1066,6 +1175,75 @@ function TableEntryView({
           </p>
         )}
       </div>
+    </main>
+  );
+}
+
+// ─── Customer-side error card ────────────────────────────────────────────
+// Reused for both "QR inválido" (missing table token) and "Sesión expirada"
+// (server rejected our token mid-flight). No retry button on purpose: the
+// recovery action is "scan the QR again", which the bar staff can also
+// trigger by handing the customer the printed QR.
+function CustomerErrorCard({
+  eyebrow,
+  title,
+  body,
+}: {
+  eyebrow: string;
+  title: string;
+  body: string;
+}) {
+  return (
+    <main
+      style={{
+        minHeight: "100dvh",
+        background: C.cream,
+        color: C.ink,
+        fontFamily: FONT_UI,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "40px 24px",
+        gap: 18,
+        textAlign: "center",
+      }}
+    >
+      <span
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 10,
+          letterSpacing: 3,
+          color: C.mute,
+          textTransform: "uppercase",
+        }}
+      >
+        {eyebrow}
+      </span>
+      <h1
+        style={{
+          fontFamily: FONT_DISPLAY,
+          fontSize: "clamp(48px, 9vw, 76px)",
+          letterSpacing: -1,
+          color: C.terracotta,
+          margin: 0,
+          lineHeight: 1,
+        }}
+      >
+        {title}
+      </h1>
+      <p
+        style={{
+          fontFamily: FONT_UI,
+          fontSize: 15,
+          color: C.cacao,
+          maxWidth: 360,
+          lineHeight: 1.5,
+          margin: 0,
+        }}
+      >
+        {body}
+      </p>
     </main>
   );
 }

@@ -20,6 +20,30 @@ import { TableProjectionService } from "../src/modules/table-projection/table-pr
 
 const prisma = new PrismaClient();
 
+let firstTableId = 1;
+let secondTableId = 2;
+let firstProductId = 1;
+async function loadFixtureIds() {
+  const tables = await prisma.table.findMany({
+    orderBy: { id: "asc" },
+    take: 2,
+    select: { id: true },
+  });
+  const products = await prisma.product.findMany({
+    orderBy: { id: "asc" },
+    take: 1,
+    select: { id: true },
+  });
+  if (tables.length < 2 || products.length < 1) {
+    throw new Error(
+      "Fixture DB missing baseline tables/products. Run `npx tsx prisma/seed.ts`.",
+    );
+  }
+  firstTableId = tables[0].id;
+  secondTableId = tables[1].id;
+  firstProductId = products[0].id;
+}
+
 const noopRealtime = {
   emitOrderRequestCreated: () => {},
   emitOrderRequestUpdated: () => {},
@@ -89,6 +113,7 @@ async function resetProductStock(productId: number, stock: number) {
 }
 
 beforeAll(async () => {
+  await loadFixtureIds();
   await cleanDb();
 });
 
@@ -103,21 +128,21 @@ beforeEach(async () => {
 
 describe("Phase C · Case 1 · create → accept → stock decrement → active order", () => {
   it("walks the happy path end-to-end", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
 
     const req = await orderRequests.create({
       table_session_id: session.id,
-      items: [{ product_id: 1, quantity: 3 }],
+      items: [{ product_id: firstProductId, quantity: 3 }],
     });
     expect(req.status).toBe(OrderRequestStatus.pending);
 
-    const table1 = await prisma.table.findUniqueOrThrow({ where: { id: 1 } });
+    const table1 = await prisma.table.findUniqueOrThrow({ where: { id: firstTableId } });
     expect(table1.pending_request_count).toBe(1);
     expect(table1.active_order_count).toBe(0);
 
     const stockAfterCreate = await prisma.product.findUniqueOrThrow({
-      where: { id: 1 },
+      where: { id: firstProductId },
     });
     expect(stockAfterCreate.stock).toBe(10);
 
@@ -125,11 +150,11 @@ describe("Phase C · Case 1 · create → accept → stock decrement → active 
     expect(accepted.status).toBe(OrderRequestStatus.accepted);
 
     const stockAfterAccept = await prisma.product.findUniqueOrThrow({
-      where: { id: 1 },
+      where: { id: firstProductId },
     });
     expect(stockAfterAccept.stock).toBe(7);
 
-    const table2 = await prisma.table.findUniqueOrThrow({ where: { id: 1 } });
+    const table2 = await prisma.table.findUniqueOrThrow({ where: { id: firstTableId } });
     expect(table2.pending_request_count).toBe(0);
     expect(table2.active_order_count).toBe(1);
 
@@ -142,22 +167,22 @@ describe("Phase C · Case 1 · create → accept → stock decrement → active 
 
 describe("Phase C · Case 2 · reject → no order → no stock change", () => {
   it("rejects without creating an order and without touching stock", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
     const req = await orderRequests.create({
       table_session_id: session.id,
-      items: [{ product_id: 1, quantity: 2 }],
+      items: [{ product_id: firstProductId, quantity: 2 }],
     });
 
     await orderRequests.reject(req.id, "test reason");
 
-    const stock = await prisma.product.findUniqueOrThrow({ where: { id: 1 } });
+    const stock = await prisma.product.findUniqueOrThrow({ where: { id: firstProductId } });
     expect(stock.stock).toBe(10);
 
     const orders = await prisma.order.count();
     expect(orders).toBe(0);
 
-    const table = await prisma.table.findUniqueOrThrow({ where: { id: 1 } });
+    const table = await prisma.table.findUniqueOrThrow({ where: { id: firstTableId } });
     expect(table.pending_request_count).toBe(0);
     expect(table.active_order_count).toBe(0);
 
@@ -171,12 +196,12 @@ describe("Phase C · Case 2 · reject → no order → no stock change", () => {
 
 describe("Phase C · Case 3 · accepted → preparing → ready → delivered creates consumption", () => {
   it("runs the full lifecycle and reflects consumption on Table.total_consumption", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
 
     const req = await orderRequests.create({
       table_session_id: session.id,
-      items: [{ product_id: 1, quantity: 2 }],
+      items: [{ product_id: firstProductId, quantity: 2 }],
     });
     const accepted = await orderRequests.accept(req.id);
     const order = accepted.order!;
@@ -200,7 +225,7 @@ describe("Phase C · Case 3 · accepted → preparing → ready → delivered cr
       Number(c.amount),
     );
 
-    const table = await prisma.table.findUniqueOrThrow({ where: { id: 1 } });
+    const table = await prisma.table.findUniqueOrThrow({ where: { id: firstTableId } });
     expect(Number(table.total_consumption)).toBeCloseTo(Number(c.amount));
     expect(table.active_order_count).toBe(0);
   });
@@ -208,42 +233,42 @@ describe("Phase C · Case 3 · accepted → preparing → ready → delivered cr
 
 describe("Phase C · Case 4 · cancel accepted order restores stock and creates no consumption", () => {
   it("restores stock on cancel and never emits Consumption", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
 
     const req = await orderRequests.create({
       table_session_id: session.id,
-      items: [{ product_id: 1, quantity: 4 }],
+      items: [{ product_id: firstProductId, quantity: 4 }],
     });
     const accepted = await orderRequests.accept(req.id);
     const orderId = accepted.order!.id;
 
     const stockAfterAccept = await prisma.product.findUniqueOrThrow({
-      where: { id: 1 },
+      where: { id: firstProductId },
     });
     expect(stockAfterAccept.stock).toBe(6);
 
     await orders.updateStatus(orderId, OrderStatus.cancelled);
 
     const stockAfterCancel = await prisma.product.findUniqueOrThrow({
-      where: { id: 1 },
+      where: { id: firstProductId },
     });
     expect(stockAfterCancel.stock).toBe(10);
 
     const consumptions = await prisma.consumption.count();
     expect(consumptions).toBe(0);
 
-    const table = await prisma.table.findUniqueOrThrow({ where: { id: 1 } });
+    const table = await prisma.table.findUniqueOrThrow({ where: { id: firstTableId } });
     expect(table.active_order_count).toBe(0);
     expect(Number(table.total_consumption)).toBe(0);
   });
 
   it("rejects invalid transitions (e.g. delivered → cancelled)", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
     const req = await orderRequests.create({
       table_session_id: session.id,
-      items: [{ product_id: 1, quantity: 1 }],
+      items: [{ product_id: firstProductId, quantity: 1 }],
     });
     const accepted = await orderRequests.accept(req.id);
     const orderId = accepted.order!.id;
@@ -259,11 +284,11 @@ describe("Phase C · Case 4 · cancel accepted order restores stock and creates 
 
 describe("Phase C · Case 5 · concurrent accept of same OrderRequest", () => {
   it("only one succeeds; stock is decremented exactly once", async () => {
-    await resetProductStock(1, 5);
-    const session = await openSession(1);
+    await resetProductStock(firstProductId, 5);
+    const session = await openSession(firstTableId);
     const req = await orderRequests.create({
       table_session_id: session.id,
-      items: [{ product_id: 1, quantity: 3 }],
+      items: [{ product_id: firstProductId, quantity: 3 }],
     });
 
     const results = await Promise.allSettled([
@@ -276,7 +301,7 @@ describe("Phase C · Case 5 · concurrent accept of same OrderRequest", () => {
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
 
-    const stock = await prisma.product.findUniqueOrThrow({ where: { id: 1 } });
+    const stock = await prisma.product.findUniqueOrThrow({ where: { id: firstProductId } });
     expect(stock.stock).toBe(2);
 
     const orderCount = await prisma.order.count({
@@ -284,23 +309,23 @@ describe("Phase C · Case 5 · concurrent accept of same OrderRequest", () => {
     });
     expect(orderCount).toBe(1);
 
-    const table = await prisma.table.findUniqueOrThrow({ where: { id: 1 } });
+    const table = await prisma.table.findUniqueOrThrow({ where: { id: firstTableId } });
     expect(table.active_order_count).toBe(1);
     expect(table.pending_request_count).toBe(0);
   });
 
   it("two requests competing for scarce stock: one accepts, one fails cleanly", async () => {
-    await resetProductStock(1, 3);
-    const session1 = await openSession(1);
-    const session2 = await openSession(2);
+    await resetProductStock(firstProductId, 3);
+    const session1 = await openSession(firstTableId);
+    const session2 = await openSession(secondTableId);
 
     const req1 = await orderRequests.create({
       table_session_id: session1.id,
-      items: [{ product_id: 1, quantity: 3 }],
+      items: [{ product_id: firstProductId, quantity: 3 }],
     });
     const req2 = await orderRequests.create({
       table_session_id: session2.id,
-      items: [{ product_id: 1, quantity: 3 }],
+      items: [{ product_id: firstProductId, quantity: 3 }],
     });
 
     const results = await Promise.allSettled([
@@ -313,7 +338,7 @@ describe("Phase C · Case 5 · concurrent accept of same OrderRequest", () => {
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
 
-    const stock = await prisma.product.findUniqueOrThrow({ where: { id: 1 } });
+    const stock = await prisma.product.findUniqueOrThrow({ where: { id: firstProductId } });
     expect(stock.stock).toBe(0);
 
     const acceptedRequests = await prisma.orderRequest.count({

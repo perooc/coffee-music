@@ -21,6 +21,36 @@ import { TableProjectionService } from "../src/modules/table-projection/table-pr
 
 const prisma = new PrismaClient();
 
+/**
+ * Resolve the first N table IDs and product IDs once for the whole suite.
+ * Seed inserts are not guaranteed to use ids 1..N because Postgres sequences
+ * do not reset on `deleteMany`. Tests therefore bind to whatever ids exist
+ * right now rather than hard-coding.
+ */
+let firstTableId = 1;
+let firstProductId = 1;
+let secondProductId = 2;
+async function loadFixtureIds() {
+  const tables = await prisma.table.findMany({
+    orderBy: { id: "asc" },
+    take: 1,
+    select: { id: true },
+  });
+  const products = await prisma.product.findMany({
+    orderBy: { id: "asc" },
+    take: 2,
+    select: { id: true },
+  });
+  if (tables.length < 1 || products.length < 2) {
+    throw new Error(
+      "Fixture DB missing baseline tables/products. Run `npx tsx prisma/seed.ts`.",
+    );
+  }
+  firstTableId = tables[0].id;
+  firstProductId = products[0].id;
+  secondProductId = products[1].id;
+}
+
 const noopRealtime = {
   emitOrderRequestCreated: () => {},
   emitOrderRequestUpdated: () => {},
@@ -127,6 +157,7 @@ async function placeAndDeliver(
 }
 
 beforeAll(async () => {
+  await loadFixtureIds();
   await cleanDb();
 });
 
@@ -141,9 +172,9 @@ beforeEach(async () => {
 
 describe("Phase D · Case 1 · delivered order shows in bill", () => {
   it("single delivery: subtotal = order amount, Table consistent", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 2);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 2);
 
     const bill = await consumptions.getBill(session.id);
     expect(bill.items).toHaveLength(1);
@@ -157,7 +188,7 @@ describe("Phase D · Case 1 · delivered order shows in bill", () => {
     const session2 = await prisma.tableSession.findUniqueOrThrow({
       where: { id: session.id },
     });
-    const table = await prisma.table.findUniqueOrThrow({ where: { id: 1 } });
+    const table = await prisma.table.findUniqueOrThrow({ where: { id: firstTableId } });
     expect(Number(session2.total_consumption)).toBe(bill.summary.total);
     expect(Number(table.total_consumption)).toBe(bill.summary.total);
   });
@@ -165,12 +196,12 @@ describe("Phase D · Case 1 · delivered order shows in bill", () => {
 
 describe("Phase D · Case 2 · two deliveries accumulate chronologically", () => {
   it("accumulates subtotal and preserves order by created_at", async () => {
-    await resetProductStock(1, 10);
-    await resetProductStock(2, 10);
-    const session = await openSession(1);
+    await resetProductStock(firstProductId, 10);
+    await resetProductStock(secondProductId, 10);
+    const session = await openSession(firstTableId);
 
-    await placeAndDeliver(session.id, 1, 1);
-    await placeAndDeliver(session.id, 2, 2);
+    await placeAndDeliver(session.id, firstProductId, 1);
+    await placeAndDeliver(session.id, secondProductId, 2);
 
     const bill = await consumptions.getBill(session.id);
     expect(bill.items).toHaveLength(2);
@@ -186,9 +217,9 @@ describe("Phase D · Case 2 · two deliveries accumulate chronologically", () =>
 
 describe("Phase D · Case 3 · positive adjustment", () => {
   it("increases bill, session, and Table.total_consumption", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 1);
 
     const before = await consumptions.getBill(session.id);
 
@@ -208,7 +239,7 @@ describe("Phase D · Case 3 · positive adjustment", () => {
       where: { id: session.id },
     });
     const freshTable = await prisma.table.findUniqueOrThrow({
-      where: { id: 1 },
+      where: { id: firstTableId },
     });
     expect(Number(freshSession.total_consumption)).toBeCloseTo(
       after.summary.total,
@@ -221,9 +252,9 @@ describe("Phase D · Case 3 · positive adjustment", () => {
 
 describe("Phase D · Case 4 · negative discount", () => {
   it("decreases bill + projections; fairness input stays consistent", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 1);
     const before = await consumptions.getBill(session.id);
 
     await consumptions.createAdjustment(session.id, {
@@ -238,7 +269,7 @@ describe("Phase D · Case 4 · negative discount", () => {
     expect(after.summary.total).toBeCloseTo(before.summary.total - 1000);
 
     const freshTable = await prisma.table.findUniqueOrThrow({
-      where: { id: 1 },
+      where: { id: firstTableId },
     });
     expect(Number(freshTable.total_consumption)).toBeCloseTo(
       after.summary.total,
@@ -249,7 +280,7 @@ describe("Phase D · Case 4 · negative discount", () => {
   });
 
   it("forces sign: discount with positive amount stored as negative", async () => {
-    const session = await openSession(1);
+    const session = await openSession(firstTableId);
     const adj = await consumptions.createAdjustment(session.id, {
       type: AdjustmentKind.discount,
       amount: 500,
@@ -261,9 +292,9 @@ describe("Phase D · Case 4 · negative discount", () => {
 
 describe("Phase D · Case 5 · session lifecycle policy", () => {
   it("closing sessions still accept adjustments", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 1);
     await setClosing(session.id);
 
     const adj = await consumptions.createAdjustment(session.id, {
@@ -275,10 +306,10 @@ describe("Phase D · Case 5 · session lifecycle policy", () => {
   });
 
   it("closed session: GET bill still works", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 1);
-    await closeSession(session.id, 1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 1);
+    await closeSession(session.id, firstTableId);
 
     const bill = await consumptions.getBill(session.id);
     expect(bill.status).toBe(TableSessionStatus.closed);
@@ -286,8 +317,8 @@ describe("Phase D · Case 5 · session lifecycle policy", () => {
   });
 
   it("closed session: POST adjustment is rejected", async () => {
-    const session = await openSession(1);
-    await closeSession(session.id, 1);
+    const session = await openSession(firstTableId);
+    await closeSession(session.id, firstTableId);
     await expect(
       consumptions.createAdjustment(session.id, {
         type: AdjustmentKind.adjustment,
@@ -300,9 +331,9 @@ describe("Phase D · Case 5 · session lifecycle policy", () => {
 
 describe("Phase D · refund / ledger immutability", () => {
   it("refund creates negative consumption and marks original reversed", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 1);
     const originalBill = await consumptions.getBill(session.id);
     const original = originalBill.items[0];
 
@@ -325,9 +356,9 @@ describe("Phase D · refund / ledger immutability", () => {
   });
 
   it("double refund is blocked", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 1);
     const bill = await consumptions.getBill(session.id);
     const original = bill.items[0];
     await consumptions.refundConsumption(original.id, { reason: "r1" });
@@ -337,9 +368,9 @@ describe("Phase D · refund / ledger immutability", () => {
   });
 
   it("refund of a refund is blocked", async () => {
-    await resetProductStock(1, 10);
-    const session = await openSession(1);
-    await placeAndDeliver(session.id, 1, 1);
+    await resetProductStock(firstProductId, 10);
+    const session = await openSession(firstTableId);
+    await placeAndDeliver(session.id, firstProductId, 1);
     const bill = await consumptions.getBill(session.id);
     const original = bill.items[0];
     const refund = await consumptions.refundConsumption(original.id, {

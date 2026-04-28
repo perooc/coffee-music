@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useCallback, useRef, useState } from "react";
 import { useAppStore } from "@/store";
 import { useSocket } from "@/lib/socket/useSocket";
@@ -12,6 +13,7 @@ import {
   musicApi,
 } from "@/lib/api/services";
 import { getErrorMessage } from "@/lib/errors";
+import { useAdminAuth } from "@/lib/auth/auth-context";
 import { AdminBillDrawer } from "@/components/admin/AdminBillDrawer";
 import type {
   Order,
@@ -1125,6 +1127,71 @@ type QueueStats = {
   top_table: { table_id: number; count: number } | null;
 };
 
+/**
+ * Small strip in the admin header showing the authenticated user and a
+ * logout control. Lives next to the brand so staff always know who is
+ * signed in on this workstation.
+ */
+function AdminWhoAmI() {
+  const { user, logout } = useAdminAuth();
+  if (!user) return null;
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 10,
+        marginLeft: 12,
+        paddingLeft: 12,
+        borderLeft: `1px solid ${C.sand}`,
+      }}
+    >
+      <span
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 10,
+          letterSpacing: 1.5,
+          color: C.cacao,
+          textTransform: "uppercase",
+          fontWeight: 700,
+        }}
+      >
+        {user.name}
+        <span
+          style={{
+            marginLeft: 6,
+            color: C.mute,
+            fontWeight: 500,
+            letterSpacing: 1,
+          }}
+        >
+          · {user.role}
+        </span>
+      </span>
+      <button
+        type="button"
+        onClick={logout}
+        title="Cerrar sesión"
+        style={{
+          padding: "4px 10px",
+          border: `1px solid ${C.sand}`,
+          background: "transparent",
+          color: C.mute,
+          borderRadius: 999,
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          letterSpacing: 1.5,
+          cursor: "pointer",
+          textTransform: "uppercase",
+          fontWeight: 700,
+        }}
+      >
+        Salir
+      </button>
+    </div>
+  );
+}
+
 export default function AdminPage() {
   const actionRef = useRef(false);
   const [stats, setStats] = useState<QueueStats | null>(null);
@@ -1205,7 +1272,7 @@ export default function AdminPage() {
     tablesApi.getAll().then(setAllTables).catch(console.error);
     queueApi.getGlobal().then(updateFromSocket).catch(console.error);
     ordersApi
-      .getAll()
+      .getAllForAdmin()
       .then((all) =>
         setOrders(
           // Only active orders are actionable; delivered/cancelled go to history.
@@ -1219,7 +1286,7 @@ export default function AdminPage() {
       )
       .catch(console.error);
     orderRequestsApi
-      .getAll({ status: "pending" })
+      .getAllForAdmin({ status: "pending" })
       .then(setOrderRequests)
       .catch(console.error);
     playbackApi.getCurrent().then(setCurrentPlayback).catch(console.error);
@@ -1400,6 +1467,39 @@ export default function AdminPage() {
             >
               Panel Admin
             </span>
+            <AdminWhoAmI />
+            <Link
+              href="/admin/products"
+              style={{
+                marginLeft: 12,
+                paddingLeft: 12,
+                borderLeft: `1px solid ${C.sand}`,
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                letterSpacing: 1.5,
+                color: C.cacao,
+                textDecoration: "none",
+                textTransform: "uppercase",
+                fontWeight: 700,
+              }}
+            >
+              Productos →
+            </Link>
+            <Link
+              href="/admin/sales"
+              style={{
+                marginLeft: 8,
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                letterSpacing: 1.5,
+                color: C.cacao,
+                textDecoration: "none",
+                textTransform: "uppercase",
+                fontWeight: 700,
+              }}
+            >
+              Ventas →
+            </Link>
           </div>
           <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "flex-end" }}>
             {statCards.map((s) => (

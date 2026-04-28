@@ -3,6 +3,10 @@
 import { useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
 import type { SocketEvents } from "@coffee-bar/shared";
+import {
+  getAdminToken,
+  getSessionToken,
+} from "@/lib/auth/token-storage";
 
 // ─── Singleton ────────────────────────────────────────────────────────────────
 let socket: Socket | null = null;
@@ -22,6 +26,25 @@ function resolveSocketUrl() {
   return "http://localhost:3001";
 }
 
+/**
+ * The socket.io middleware on the server reads `handshake.auth.token`.
+ * We prefer an admin token (staff panel / player — actually: only the admin
+ * panel, the player is anonymous) and fall back to a session token
+ * (customer QR flow). Anonymous connections are legal and just land in the
+ * global channel.
+ *
+ * Using a function so reconnects pick up a token that was minted after the
+ * first connect attempt (e.g. the user opens their session after the
+ * player already connected anonymously).
+ */
+function resolveSocketAuth(): { token?: string } {
+  const admin = getAdminToken();
+  if (admin) return { token: admin };
+  const session = getSessionToken();
+  if (session) return { token: session };
+  return {};
+}
+
 function getSocket(): Socket {
   if (!socket) {
     socket = io(resolveSocketUrl(), {
@@ -31,6 +54,7 @@ function getSocket(): Socket {
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 10000,
+      auth: (cb) => cb(resolveSocketAuth()),
     });
 
     socket.on("connect", () => {

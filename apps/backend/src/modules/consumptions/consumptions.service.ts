@@ -19,6 +19,16 @@ import {
 } from "./dto/create-adjustment.dto";
 import { RefundConsumptionDto } from "./dto/refund-consumption.dto";
 
+/**
+ * The authenticated staff/admin acting on the ledger. When provided, the
+ * service ignores any `created_by` sent in the DTO: the body is never trusted
+ * as a source of audit truth once there is a user behind the token.
+ */
+export type AuditActor = {
+  user_id: number;
+  name: string;
+} | null;
+
 const CONSUMPTION_INCLUDE = {
   order: { select: { id: true, status: true } },
   reverses: { select: { id: true, description: true, amount: true, type: true } },
@@ -92,6 +102,7 @@ export class ConsumptionsService {
   async createAdjustment(
     sessionId: number,
     dto: CreateAdjustmentDto,
+    actor: AuditActor = null,
   ): Promise<ConsumptionFull> {
     const session = await this.prisma.tableSession.findUnique({
       where: { id: sessionId },
@@ -137,7 +148,11 @@ export class ConsumptionsService {
           type,
           reason: dto.reason,
           notes: dto.notes ?? null,
-          created_by: dto.created_by ?? null,
+          // Audit rule: server is the single source of truth. The DTO does
+          // not even expose `created_by` anymore (Phase G7) — only an
+          // authenticated actor can stamp it. Internal callers (seeds,
+          // scripts) write null, which is the honest answer.
+          created_by: actor?.name ?? null,
         },
         include: CONSUMPTION_INCLUDE,
       });
@@ -167,6 +182,7 @@ export class ConsumptionsService {
   async refundConsumption(
     consumptionId: number,
     dto: RefundConsumptionDto,
+    actor: AuditActor = null,
   ): Promise<ConsumptionFull> {
     const original = await this.prisma.consumption.findUnique({
       where: { id: consumptionId },
@@ -225,7 +241,8 @@ export class ConsumptionsService {
           reverses_id: consumptionId,
           reason: dto.reason,
           notes: dto.notes ?? null,
-          created_by: dto.created_by ?? null,
+          // Audit rule: see createAdjustment.
+          created_by: actor?.name ?? null,
         },
         include: CONSUMPTION_INCLUDE,
       });

@@ -32,7 +32,14 @@ async function bootstrap() {
 
   app.useGlobalPipes(
     new ValidationPipe({
+      // Strip unknown fields silently — was already on.
       whitelist: true,
+      // Reject the request entirely if there are unknown fields. This makes
+      // forged client payloads (e.g. trying to inject created_by, role, or
+      // other privileged fields the DTO does not declare) a 400 instead of a
+      // silent strip, so they show up in monitoring.
+      forbidNonWhitelisted: true,
+      // Transform plain bodies into DTO instances + coerce primitives.
       transform: true,
     }),
   );

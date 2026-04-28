@@ -56,6 +56,29 @@ enum PlaybackStatus {
   paused
 }
 
+enum UserRole {
+  admin
+  staff
+}
+
+enum InventoryMovementType {
+  restock
+  adjustment
+  waste
+  correction
+}
+
+model User {
+  id            Int      @id @default(autoincrement())
+  name          String
+  email         String   @unique
+  password_hash String
+  role          UserRole @default(staff)
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+}
+
 model Table {
   id                     Int            @id @default(autoincrement())
   number                 Int            @unique
@@ -128,15 +151,45 @@ model QueueItem {
 }
 
 model Product {
-  id          Int         @id @default(autoincrement())
-  name        String
-  price       Decimal     @db.Decimal(10, 2)
-  stock       Int         @default(0)
-  is_active   Boolean     @default(true)
-  category    String
-  created_at  DateTime    @default(now())
-  updated_at  DateTime    @updatedAt
-  order_items OrderItem[]
+  id                    Int                  @id @default(autoincrement())
+  name                  String
+  description           String?
+  price                 Decimal              @db.Decimal(10, 2)
+  stock                 Int                  @default(0)
+  // Threshold below which the admin UI flags the product as "low stock".
+  // 0 = no warning. Operational hint, not enforced anywhere.
+  low_stock_threshold   Int                  @default(0)
+  is_active             Boolean              @default(true)
+  category              String
+  created_at            DateTime             @default(now())
+  updated_at            DateTime             @updatedAt
+  order_items           OrderItem[]
+  inventory_movements   InventoryMovement[]
+}
+
+/**
+ * Audit-grade record of every manual change to Product.stock that was not
+ * caused by an order accept/cancel. Sales (accept lowering stock) and
+ * cancellations (refunding stock) are NOT InventoryMovement rows: those are
+ * already tracked by Order/OrderItem and do not duplicate here. This table
+ * answers the question "why did stock change *outside* of customer flow?".
+ */
+model InventoryMovement {
+  id          Int                   @id @default(autoincrement())
+  product_id  Int
+  type        InventoryMovementType
+  // Signed delta applied to Product.stock at the moment of recording. The
+  // service layer enforces sign rules per type (restock > 0, waste < 0,
+  // adjustment/correction free).
+  quantity    Int
+  reason      String?
+  notes       String?
+  created_by  String?
+  created_at  DateTime              @default(now())
+  product     Product               @relation(fields: [product_id], references: [id], onDelete: Cascade)
+
+  @@index([product_id, created_at])
+  @@index([type, created_at])
 }
 
 model OrderRequest {

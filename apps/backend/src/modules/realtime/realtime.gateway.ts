@@ -3,12 +3,15 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
 } from "@nestjs/websockets";
 import { Logger } from "@nestjs/common";
 import { Server, Socket } from "socket.io";
+import { TokenService } from "../auth/token.service";
+import type { AuthPayload } from "../auth/types";
 
 type Channel = "global" | "staff" | "session";
 
@@ -21,8 +24,24 @@ type EventPayload = {
 
 const STAFF_ROOM = "staff";
 const sessionRoom = (sessionId: number) => `tableSession:${sessionId}`;
-const tableRoom = (tableId: number) => `table:${tableId}`;
 
+/**
+ * Socket authorization model (Phase G5):
+ *
+ *   - Anonymous connections ARE allowed. They can only receive `global`
+ *     channel events (queue:updated, playback:updated). The TV player and
+ *     landing pages rely on this.
+ *   - Any `:join` handler checks `socket.data.auth`. Rooms are the perimeter:
+ *     without a valid token, the client cannot join STAFF_ROOM, a session
+ *     room, or the legacy table room.
+ *   - Staff auto-join STAFF_ROOM on connect. Session clients auto-join their
+ *     own session room. Table tokens are meaningful for HTTP but not for
+ *     sockets, so they do not receive auto-join.
+ *
+ * Why verify at middleware time (server.use) rather than inside each handler:
+ * cross-cuts every emission path, no controller can forget to check, and the
+ * payload lives on `socket.data.auth` for the lifetime of the connection.
+ */
 @WebSocketGateway({
   cors: {
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
@@ -30,15 +49,55 @@ const tableRoom = (tableId: number) => `table:${tableId}`;
   },
 })
 export class RealtimeGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
   @WebSocketServer()
   server!: Server;
 
   private readonly logger = new Logger(RealtimeGateway.name);
 
+  constructor(private readonly tokens: TokenService) {}
+
+  afterInit(server: Server) {
+    // Verify token at handshake. Invalid tokens ⇒ anonymous. Missing token ⇒
+    // anonymous. Only a PROVIDED-but-INVALID token is rejected: that case is
+    // almost always a bug the client should learn about.
+    server.use((socket, next) => {
+      const token = this.readToken(socket);
+      if (!token) {
+        socket.data.auth = null;
+        return next();
+      }
+      try {
+        const payload = this.tokens.verify(token);
+        socket.data.auth = payload;
+        return next();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "invalid token";
+        return next(new Error(`socket auth: ${msg}`));
+      }
+    });
+  }
+
   handleConnection(client: Socket) {
-    this.logger.log(`Client connected: ${client.id}`);
+    const auth = this.getAuth(client);
+    if (auth?.kind === "admin") {
+      void client.join(STAFF_ROOM);
+      this.logger.log(
+        `Client ${client.id} connected as admin (auto-joined ${STAFF_ROOM})`,
+      );
+      return;
+    }
+    if (auth?.kind === "session") {
+      void client.join(sessionRoom(auth.session_id));
+      this.logger.log(
+        `Client ${client.id} connected as session ${auth.session_id}`,
+      );
+      return;
+    }
+    this.logger.log(
+      `Client ${client.id} connected anonymously (global channel only)`,
+    );
   }
 
   handleDisconnect(client: Socket) {
@@ -52,9 +111,25 @@ export class RealtimeGateway
     @MessageBody() sessionId: number,
     @ConnectedSocket() client: Socket,
   ) {
-    const room = sessionRoom(sessionId);
-    void client.join(room);
-    this.logger.log(`Client ${client.id} joined ${room}`);
+    const auth = this.getAuth(client);
+    if (!auth) return this.denyJoin(client, "tableSession:join", "anonymous");
+    if (auth.kind === "admin") {
+      void client.join(sessionRoom(sessionId));
+      return;
+    }
+    if (auth.kind !== "session") {
+      return this.denyJoin(client, "tableSession:join", `kind=${auth.kind}`);
+    }
+    if (auth.session_id !== sessionId) {
+      return this.denyJoin(
+        client,
+        "tableSession:join",
+        `cross-session ${auth.session_id} → ${sessionId}`,
+      );
+    }
+    // Already auto-joined at connect, but re-joining after a room leave is
+    // legitimate — idempotent.
+    void client.join(sessionRoom(sessionId));
   }
 
   @SubscribeMessage("tableSession:leave")
@@ -62,35 +137,35 @@ export class RealtimeGateway
     @MessageBody() sessionId: number,
     @ConnectedSocket() client: Socket,
   ) {
-    const room = sessionRoom(sessionId);
-    void client.leave(room);
+    // Leaving a room never needs auth: worst case, a client leaves a room
+    // they were never in, which is a no-op.
+    void client.leave(sessionRoom(sessionId));
   }
 
   @SubscribeMessage("staff:join")
   handleStaffJoin(@ConnectedSocket() client: Socket) {
+    const auth = this.getAuth(client);
+    if (!auth || auth.kind !== "admin") {
+      return this.denyJoin(client, "staff:join", auth ? `kind=${auth.kind}` : "anonymous");
+    }
     void client.join(STAFF_ROOM);
-    this.logger.log(`Client ${client.id} joined ${STAFF_ROOM}`);
   }
 
   @SubscribeMessage("table:join")
-  handleTableJoin(
-    @MessageBody() tableId: number,
-    @ConnectedSocket() client: Socket,
-  ) {
-    // Legacy room kept for compatibility with older clients.
-    const room = tableRoom(tableId);
-    void client.join(room);
+  handleTableJoin(@ConnectedSocket() client: Socket) {
+    // Legacy table room is no longer used by any new emitter. We accept
+    // the message for back-compat but refuse to join without admin auth.
+    const auth = this.getAuth(client);
+    if (!auth || auth.kind !== "admin") {
+      return this.denyJoin(client, "table:join", auth ? `kind=${auth.kind}` : "anonymous");
+    }
+    // Admin joining the legacy table room is a no-op in the new model.
+    // We log and silently ignore instead of joining, so we stop leaking the
+    // legacy surface to new clients.
+    this.logger.debug(`Legacy table:join from admin ${client.id} ignored`);
   }
 
   // ─── Channel layer ────────────────────────────────────────────────────────
-  //
-  // Why: Emitting is encapsulated in three channels so future auth/role wiring
-  // (e.g. staff-only auth) can swap a single method without touching callers.
-  //
-  // global  -> every connected client (queue, playback, lobby views).
-  // staff   -> staff dashboard. Today broadcast via `server.emit`; later becomes
-  //            `server.to(STAFF_ROOM).emit` once auth gates the join.
-  // session -> the specific tableSession room only.
 
   private dispatch(evt: EventPayload) {
     const { channel, event, payload, sessionId } = evt;
@@ -99,10 +174,9 @@ export class RealtimeGateway
         this.server.emit(event, payload);
         return;
       case "staff":
-        // TODO(auth): swap to `this.server.to(STAFF_ROOM).emit(event, payload)`
-        // once staff socket auth is in place. For now, broadcast to match
-        // current behavior. The channel boundary is the important part.
-        this.server.emit(event, payload);
+        // Room-scoped now that staff auto-joins on connect. Anonymous and
+        // customer sockets never receive staff-channel events.
+        this.server.to(STAFF_ROOM).emit(event, payload);
         return;
       case "session":
         if (sessionId == null) {
@@ -126,9 +200,6 @@ export class RealtimeGateway
   }
 
   // ─── Public emitters ──────────────────────────────────────────────────────
-  // Each emitter declares which channels it fans out to. Session-scoped events
-  // take sessionId and fan out to (session + staff). Global events go to every
-  // client. Call sites remain simple and readable.
 
   emitBillUpdated(sessionId: number, payload: unknown) {
     this.emitToSession(sessionId, "bill:updated", payload);
@@ -170,19 +241,36 @@ export class RealtimeGateway
     this.emitToStaff("table-session:closed", payload);
   }
 
-  // Table-level events target staff + global admin views. Customers consume
-  // session/bill signals, not raw Table rows.
   emitTableUpdated(payload: unknown) {
     this.emitToStaff("table:updated", payload);
     this.emitGlobal("table:updated", payload);
   }
 
-  // Music surface is global by design: player page serves every client.
   emitQueueUpdated(payload: unknown) {
     this.emitGlobal("queue:updated", payload);
   }
 
   emitPlaybackUpdated(payload: unknown) {
     this.emitGlobal("playback:updated", payload);
+  }
+
+  // ─── Internals ────────────────────────────────────────────────────────────
+
+  private readToken(socket: Socket): string | null {
+    const raw =
+      (socket.handshake.auth as Record<string, unknown> | undefined)?.token ??
+      socket.handshake.query?.token;
+    if (typeof raw === "string" && raw.trim()) return raw.trim();
+    return null;
+  }
+
+  private getAuth(client: Socket): AuthPayload | null {
+    const auth = client.data.auth as AuthPayload | null | undefined;
+    return auth ?? null;
+  }
+
+  private denyJoin(client: Socket, event: string, reason: string) {
+    this.logger.warn(`DENY ${event} from ${client.id}: ${reason}`);
+    client.emit("auth:denied", { event, reason });
   }
 }

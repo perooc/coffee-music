@@ -74,9 +74,9 @@ export function AdminBillDrawer({
     if (sessionId == null) return;
     setLoadError(null);
     billApi
-      .get(sessionId)
+      .getForAdmin(sessionId)
       .then(setBill)
-      .catch((e) => setLoadError(getErrorMessage(e)));
+      .catch((e: unknown) => setLoadError(getErrorMessage(e)));
   }, [sessionId]);
 
   useEffect(() => {
@@ -622,7 +622,6 @@ function ActionModal({
   const [amountStr, setAmountStr] = useState("");
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
-  const [createdBy, setCreatedBy] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -647,12 +646,13 @@ function ActionModal({
     setSubmitting(true);
     setError(null);
     try {
+      // `created_by` is stamped by the backend from the admin JWT (G6).
+      // The UI used to accept a manual "Responsable" field; it is gone now.
       if (kind === "refund") {
         if (consumptionId == null) throw new Error("Missing consumption id");
         await billApi.refundConsumption(consumptionId, {
           reason: reason.trim(),
           notes: notes.trim() || undefined,
-          created_by: createdBy.trim() || undefined,
         });
       } else {
         await billApi.createAdjustment(sessionId, {
@@ -660,7 +660,6 @@ function ActionModal({
           amount: amountNum,
           reason: reason.trim(),
           notes: notes.trim() || undefined,
-          created_by: createdBy.trim() || undefined,
         });
       }
       onDone();
@@ -790,17 +789,6 @@ function ActionModal({
           />
         </label>
 
-        <label style={labelStyle}>
-          <span style={labelTextStyle}>Responsable (opcional)</span>
-          <input
-            type="text"
-            value={createdBy}
-            onChange={(e) => setCreatedBy(e.target.value)}
-            placeholder="Nombre del staff"
-            maxLength={100}
-            style={inputStyle}
-          />
-        </label>
 
         {error && (
           <p
