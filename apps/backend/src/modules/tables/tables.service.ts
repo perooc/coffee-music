@@ -10,6 +10,16 @@ const tableListInclude = {
       songs: true,
     },
   },
+  // Embed the session's payment flags so the admin dashboard can render
+  // "Pidió cuenta" / "Pagada" badges without a second round-trip per row.
+  current_session: {
+    select: {
+      id: true,
+      status: true,
+      payment_requested_at: true,
+      paid_at: true,
+    },
+  },
 } satisfies Prisma.TableInclude;
 
 const tableDetailInclude = {
@@ -117,6 +127,16 @@ export class TablesService {
     return {
       ...this.serializeTable(table),
       _count: table._count,
+      // Expose only the session's payment-related flags. The full session
+      // shape lives behind /table-sessions/:id for the admin bill drawer.
+      current_session: table.current_session
+        ? {
+            id: table.current_session.id,
+            status: table.current_session.status,
+            payment_requested_at: table.current_session.payment_requested_at,
+            paid_at: table.current_session.paid_at,
+          }
+        : null,
     };
   }
 

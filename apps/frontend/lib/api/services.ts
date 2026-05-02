@@ -33,6 +33,35 @@ export const tablesApi = {
     adminApi.get<Table>(`/tables/${id}/detail`).then((r) => r.data),
 };
 
+// ─── Public table picker (temporary) ─────────────────────────────────────────
+// Used by the landing while physical QRs aren't out yet. Both endpoints
+// are gated by `BAR_ACCESS_CODE` server-side and disabled wholesale by
+// `ALLOW_PUBLIC_TABLE_TOKENS=false`. When that flag flips, this whole
+// surface starts returning 503 — no client breakage, just the temporary
+// flow gracefully shuts off.
+export interface PublicTableSummary {
+  id: number;
+  number: number;
+  status: string;
+}
+export const publicTablesApi = {
+  listAvailable: (): Promise<PublicTableSummary[]> =>
+    publicApi
+      .get<PublicTableSummary[]>("/public/tables/available")
+      .then((r) => r.data),
+  requestAccess: (
+    tableId: number,
+    code: string,
+  ): Promise<{
+    table: { id: number; number: number };
+    table_token: string;
+    expires_in: string;
+  }> =>
+    publicApi
+      .post(`/public/tables/${tableId}/access`, { code })
+      .then((r) => r.data),
+};
+
 // ─── Table Sessions ───────────────────────────────────────────────────────────
 // Discovery + open use the *table* token (QR). Close is admin. getById is
 // admin (bill drawer).
@@ -72,6 +101,25 @@ export const tableSessionsApi = {
       throw err;
     }
   },
+
+  // ─── Payment flow ───────────────────────────────────────────────────────
+  /** Customer asks for the bill. Blocked while there are in-flight orders. */
+  requestPayment: (sessionId: number): Promise<TableSession> =>
+    customerApi
+      .post<TableSession>(`/table-sessions/${sessionId}/request-payment`)
+      .then((r) => r.data),
+  /** Customer cancels their own pending payment request. */
+  cancelPaymentRequest: (sessionId: number): Promise<TableSession> =>
+    customerApi
+      .post<TableSession>(
+        `/table-sessions/${sessionId}/cancel-payment-request`,
+      )
+      .then((r) => r.data),
+  /** Admin records the payment AND closes the session in one step. */
+  markPaid: (sessionId: number): Promise<TableSession> =>
+    adminApi
+      .post<TableSession>(`/table-sessions/${sessionId}/mark-paid`)
+      .then((r) => r.data),
 };
 
 // ─── Order Requests ───────────────────────────────────────────────────────────
@@ -342,20 +390,96 @@ export const songsApi = {
     publicApi.get<Song[]>("/songs").then((r) => r.data),
 };
 
+// ─── House Playlist (admin) ──────────────────────────────────────────────────
+export interface HousePlaylistItem {
+  id: number;
+  youtube_id: string;
+  title: string;
+  artist: string | null;
+  duration: number;
+  is_active: boolean;
+  sort_order: number;
+  last_played_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type HousePlaylistValidation =
+  | {
+      valid: true;
+      youtube_id: string;
+      title: string;
+      artist: string | null;
+      duration: number;
+      thumbnail: string | null;
+    }
+  | { valid: false; reason: string; code: string };
+
+export const housePlaylistApi = {
+  list: (): Promise<HousePlaylistItem[]> =>
+    adminApi.get<HousePlaylistItem[]>("/house-playlist").then((r) => r.data),
+  validate: (url: string): Promise<HousePlaylistValidation> =>
+    adminApi
+      .get<HousePlaylistValidation>("/house-playlist/validate", {
+        params: { url },
+      })
+      .then((r) => r.data),
+  create: (
+    url: string,
+  ): Promise<{ ok: true; item: HousePlaylistItem } | { ok: false; code: string; message: string }> =>
+    adminApi
+      .post<
+        | { ok: true; item: HousePlaylistItem }
+        | { ok: false; code: string; message: string }
+      >("/house-playlist", { url })
+      .then((r) => r.data),
+  update: (
+    id: number,
+    patch: Partial<{ is_active: boolean; sort_order: number; title: string }>,
+  ): Promise<HousePlaylistItem> =>
+    adminApi
+      .patch<HousePlaylistItem>(`/house-playlist/${id}`, patch)
+      .then((r) => r.data),
+  remove: (id: number): Promise<{ ok: true }> =>
+    adminApi
+      .delete<{ ok: true }>(`/house-playlist/${id}`)
+      .then((r) => r.data),
+};
+
 // ─── Queue ────────────────────────────────────────────────────────────────────
 // Reads are public (the TV player has no login). Customer writes use
 // `customerApi` (session token). Admin writes use `adminApi`.
 export const queueApi = {
   getGlobal: (): Promise<QueueItem[]> =>
     publicApi.get<QueueItem[]>("/queue/global").then((r) => r.data),
-  getByTable: (tableId: number): Promise<QueueItem[]> =>
-    customerApi
-      .get<QueueItem[]>(`/queue?table_id=${tableId}`)
-      .then((r) => r.data),
-  getByTableWithHistory: (tableId: number): Promise<QueueItem[]> =>
-    customerApi
-      .get<QueueItem[]>(`/queue?table_id=${tableId}&include_history=true`)
-      .then((r) => r.data),
+  /**
+   * Per-table active queue. Pass `since` (ISO timestamp, usually
+   * `session.opened_at`) to scope results to the current session — the
+   * customer view should never see rows from a previous occupant.
+   */
+  getByTable: (
+    tableId: number,
+    opts?: { since?: string },
+  ): Promise<QueueItem[]> => {
+    const q = new URLSearchParams({ table_id: String(tableId) });
+    if (opts?.since) q.set("since", opts.since);
+    return customerApi
+      .get<QueueItem[]>(`/queue?${q.toString()}`)
+      .then((r) => r.data);
+  },
+  getByTableWithHistory: (
+    tableId: number,
+    opts?: { since?: string },
+  ): Promise<QueueItem[]> => {
+    const q = new URLSearchParams({
+      table_id: String(tableId),
+      include_history: "true",
+    });
+    if (opts?.since) q.set("since", opts.since);
+    return customerApi
+      .get<QueueItem[]>(`/queue?${q.toString()}`)
+      .then((r) => r.data);
+  },
   getCurrent: (): Promise<QueueItem | null> =>
     publicApi.get<QueueItem | null>("/queue/current").then((r) => r.data),
   addSong: (payload: {

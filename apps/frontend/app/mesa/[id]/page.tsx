@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, use, useCallback, useState } from "react";
+import { useEffect, use, useCallback, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   useAppStore,
@@ -19,6 +19,7 @@ import {
 } from "@/lib/api/services";
 import {
   clearSessionToken,
+  getSessionToken,
   getTableToken,
   setSessionToken,
   setTableToken,
@@ -35,51 +36,46 @@ import type {
   TableSession,
 } from "@coffee-bar/shared";
 import {
-  SCOREBOARD_MAX_CONSUMPTION,
   MAX_SONGS_PER_TABLE,
+  EXTRA_SONG_CONSUMPTION_THRESHOLD,
+  effectiveSongLimit,
 } from "@coffee-bar/shared";
 import SongSearch from "@/components/music/SongSearch";
 import { MySongsPanel } from "@/components/music/MySongsPanel";
 import { OrderRequestCart } from "@/components/orders/OrderRequestCart";
+import { CustomerBillModal } from "@/components/orders/CustomerBillModal";
+import { TrackTitleMarquee } from "@/components/music/TrackTitleMarquee";
+import {
+  C,
+  FONT_HEADING,
+  FONT_DISPLAY,
+  FONT_UI,
+  FONT_MONO,
+  SHARED_KEYFRAMES,
+  THEME_CSS_VARS,
+  fmt,
+  pad,
+  secToMin,
+} from "@/lib/theme";
 
-// ─── Warm premium palette ─────────────────────────────────────────────────────
-const C = {
-  cream: "#FDF8EC",
-  parchment: "#F8F1E4",
-  sand: "#F1E6D2",
-  sandDark: "#E6D8BF",
-  gold: "#B8894A",
-  goldSoft: "#E8D4A8",
-  terracotta: "#8B2635",
-  terracottaSoft: "#E8CDD2",
-  olive: "#6B7E4A",
-  oliveSoft: "#E5EAD3",
-  cacao: "#6B4E2E",
-  ink: "#2B1D14",
-  mute: "#A89883",
-  paper: "#FFFDF8",
-  shadow: "0 1px 0 rgba(43,29,20,0.04), 0 12px 32px -18px rgba(107,78,46,0.28)",
-  shadowLift: "0 2px 0 rgba(43,29,20,0.05), 0 22px 40px -18px rgba(184,137,74,0.55)",
-};
-
-const FONT_DISPLAY = "var(--font-bebas), 'Bebas Neue', Impact, sans-serif";
-const FONT_UI = "var(--font-manrope), system-ui, sans-serif";
-const FONT_MONO = "var(--font-oswald), 'Oswald', ui-monospace, monospace";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const fmt = (n: number) =>
-  new Intl.NumberFormat("es-CO", {
-    style: "currency",
-    currency: "COP",
-    maximumFractionDigits: 0,
-  }).format(n);
-
-const pad = (n: number) => String(n).padStart(2, "0");
-const secToMin = (s: number) => `${Math.floor(s / 60)}:${pad(s % 60)}`;
-
-function buildMesaQueue(tableQueue: QueueItem[], tableId: number) {
+function buildMesaQueue(
+  tableQueue: QueueItem[],
+  tableId: number,
+  sessionStartIso?: string | null,
+) {
+  // `sessionStartIso` keeps the customer view scoped to the current
+  // session — without it, items queued by a previous occupant of the same
+  // physical table would still appear here.
+  const sinceMs = sessionStartIso
+    ? new Date(sessionStartIso).getTime()
+    : null;
   return tableQueue
-    .filter((item) => item.table_id === tableId && item.status === "pending")
+    .filter(
+      (item) =>
+        item.table_id === tableId &&
+        item.status === "pending" &&
+        (sinceMs == null || new Date(item.created_at).getTime() >= sinceMs),
+    )
     .sort((a, b) => a.position - b.position);
 }
 
@@ -101,6 +97,25 @@ function upsertById<T extends { id: number }>(items: T[], nextItem: T) {
     : [nextItem, ...items];
 }
 
+/**
+ * Best-effort decode of `session_id` from the JWT payload. We do NOT verify
+ * the signature — this is only used to detect a stale local token (one that
+ * targets a different session than the one the server currently has open
+ * for the table). The backend will still verify any token that survives.
+ */
+function decodeJwtSessionId(token: string): number | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const json = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
+    const payload = JSON.parse(json) as Record<string, unknown>;
+    if (typeof payload.session_id === "number") return payload.session_id;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 type TabKey = "cola" | "canciones" | "pedidos";
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -120,6 +135,25 @@ export default function MesaPage({
   const [bill, setBill] = useState<BillView | null>(null);
   const [openingSession, setOpeningSession] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  // Mirrors session.opened_at so socket-driven callbacks (which capture
+  // their `session` value at registration time) can still scope queue
+  // filtering by the current session start.
+  const sessionStartRef = useRef<string | null>(null);
+  // In-page toasts for payment lifecycle moments. Local because the
+  // dispatch logic lives entirely on this screen.
+  const [toasts, setToasts] = useState<
+    { id: number; tone: "olive" | "gold" | "cacao"; message: string }[]
+  >([]);
+  const pushToast = useCallback(
+    (tone: "olive" | "gold" | "cacao", message: string) => {
+      const id = Date.now() + Math.random();
+      setToasts((prev) => [...prev, { id, tone, message }]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 6000);
+    },
+    [],
+  );
   // QR/table token plumbing.
   //   "checking" — first paint, before we have read the URL/storage.
   //   "ok"       — we have a table token (from ?t=... or sessionStorage).
@@ -145,6 +179,7 @@ export default function MesaPage({
   const [cartMode, setCartMode] = useState<CartMode>({ kind: "closed" });
   const cartOpen = cartMode.kind !== "closed";
   const closeCart = useCallback(() => setCartMode({ kind: "closed" }), []);
+  const [billModalOpen, setBillModalOpen] = useState(false);
 
   const {
     currentTable,
@@ -193,33 +228,72 @@ export default function MesaPage({
       // These four calls share the same auth context (session_token), so
       // they must not run before a session exists. The pre-session entry
       // view does NOT call this; it only renders the public surface.
+      // Queue calls are scoped to `session.opened_at` so the customer
+      // never inherits queue items from a previous occupant of the same
+      // physical table.
+      const since = sessionToHydrate.opened_at;
       const [nextBill, nextOrders, nextRequests, tableQueue, tableQueueHistory] =
         await Promise.all([
           billApi.getForSession(sessionToHydrate.id),
           ordersApi.getAllForSession(sessionToHydrate.id),
           orderRequestsApi.getAllForSession(sessionToHydrate.id),
-          queueApi.getByTable(tableId),
-          queueApi.getByTableWithHistory(tableId),
+          queueApi.getByTable(tableId, { since }),
+          queueApi.getByTableWithHistory(tableId, { since }),
         ]);
 
       setBill(nextBill);
       setOrders(dedupeById(nextOrders));
       setMyRequests(dedupeById(nextRequests));
-      updateFromSocket(buildMesaQueue(tableQueue, tableId));
+      updateFromSocket(buildMesaQueue(tableQueue, tableId, since));
       setMySongs(dedupeById(tableQueueHistory));
     },
     [setOrders, tableId, updateFromSocket, setMySongs],
   );
 
+  // Keep the ref in sync with the live session so socket callbacks below
+  // always see the right scope.
+  useEffect(() => {
+    sessionStartRef.current = session?.opened_at ?? null;
+  }, [session?.opened_at]);
+
+  // Detect user-visible payment transitions and fire toasts. We compare
+  // against a ref of the previous session — NOT against the previous state
+  // inside `setSession` — because in React strict mode (dev) the updater
+  // callback runs twice, which used to fire each toast twice.
+  const prevSessionRef = useRef<TableSession | null>(null);
+  useEffect(() => {
+    const prev = prevSessionRef.current;
+    const next = session ?? null;
+    if (prev && next && prev.id === next.id) {
+      if (!prev.payment_requested_at && next.payment_requested_at) {
+        pushToast("gold", "Cuenta solicitada — el bar se acercará pronto.");
+      }
+      // null → paid_at: admin processed the payment. The session also
+      // transitions to `closed` immediately, so this toast flashes briefly
+      // before the entry view takes over (the closed handler clears state).
+      if (!prev.paid_at && next.paid_at) {
+        pushToast("olive", "Cuenta pagada — ¡gracias por tu visita!");
+      }
+    }
+    prevSessionRef.current = next;
+  }, [session, pushToast]);
+
   const handleQueueUpdated = useCallback(
     (q: QueueItem[]) => {
-      updateFromSocket(buildMesaQueue(q, tableId));
+      const since = sessionStartRef.current;
+      updateFromSocket(buildMesaQueue(q, tableId, since));
       setGlobalQueue(q);
+      const sinceMs = since ? new Date(since).getTime() : null;
       const prev = useAppStore.getState().mySongs;
       const history = prev.filter(
         (s) => s.status === "played" || s.status === "skipped",
       );
-      const freshActive = q.filter((item) => item.table_id === tableId);
+      const freshActive = q.filter(
+        (item) =>
+          item.table_id === tableId &&
+          (sinceMs == null ||
+            new Date(item.created_at).getTime() >= sinceMs),
+      );
       setMySongs(dedupeById([...freshActive, ...history]));
     },
     [tableId, updateFromSocket, setMySongs],
@@ -258,6 +332,19 @@ export default function MesaPage({
     },
     [session, clearMesaSessionState],
   );
+  // Backend emits this on request-payment and cancel-payment-request.
+  // (mark-paid closes the session and arrives via onTableSessionClosed.)
+  // Merge the patch into the current session — toast detection lives in
+  // a separate useEffect to avoid double-firing under React strict mode.
+  const handleTableSessionUpdated = useCallback(
+    (patch: Partial<TableSession> & { id: number }) => {
+      setSession((prev) => {
+        if (!prev || prev.id !== patch.id) return prev;
+        return { ...prev, ...patch };
+      });
+    },
+    [],
+  );
   const handleOrderRequestUpdated = useCallback(
     (r: OrderRequest) => {
       if (!session || r.table_session_id !== session.id) return;
@@ -291,6 +378,7 @@ export default function MesaPage({
     onOrderRequestUpdated: handleOrderRequestUpdated,
     onPlaybackUpdated: handlePlaybackUpdated,
     onBillUpdated: handleBillUpdated,
+    onTableSessionUpdated: handleTableSessionUpdated,
     onTableSessionClosed: handleSessionClosed,
     onReconnect: handleSocketReconnect,
   });
@@ -355,7 +443,31 @@ export default function MesaPage({
 
     tableSessionsApi
       .getCurrentForTable(tableId)
-      .then((s) => setSession(s))
+      .then((s) => {
+        // The server may have an open session for this physical table that
+        // does NOT belong to this device (different customer, or our local
+        // session_token is stale / from before a reseed). Without a token
+        // we'd just spam 401s on every customer-API call. Render the entry
+        // view instead.
+        const stored = getSessionToken();
+        if (s && !stored) {
+          setSession(null);
+          return;
+        }
+        // If our stored token is for a different session_id than the one
+        // the table currently has open, it is stale (e.g. backend reseeded,
+        // or a different customer is now at the table). Drop it and fall
+        // back to the entry view to mint a fresh token.
+        if (s && stored) {
+          const payloadId = decodeJwtSessionId(stored);
+          if (payloadId != null && payloadId !== s.id) {
+            clearSessionToken();
+            setSession(null);
+            return;
+          }
+        }
+        setSession(s);
+      })
       .catch((err) => {
         const status = (err as { response?: { status?: number } })?.response
           ?.status;
@@ -372,26 +484,41 @@ export default function MesaPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tableId, tableTokenStatus]);
 
-  // When a session is known, fetch session-scoped data (bill + orders + requests).
+  // When a session is known, fetch session-scoped data (bill + orders +
+  // requests). Keyed on session.id only, not the whole `session` object,
+  // so socket-driven patches (payment_requested_at toggling, total bumps)
+  // don't cause an entire re-hydrate. Subsequent updates arrive via
+  // their own socket events; this effect is the cold-start hydrate.
+  const sessionId = session?.id;
   useEffect(() => {
-    if (!session) {
+    if (sessionId == null) {
       setBill(null);
       setOrders([]);
       setMyRequests([]);
       return;
     }
-    hydrateSessionData(session).catch((err: unknown) => {
+    // Read the latest session via the closure on every fire — fine because
+    // the effect only fires when the id changes.
+    const current = session;
+    if (!current) return;
+    hydrateSessionData(current).catch((err: unknown) => {
       const status = (err as { response?: { status?: number } })?.response
         ?.status;
-      if (status === 401 || status === 403) {
-        // Session token expired or revoked while we had a live session.
-        // Surface the recovery card; user must scan the QR again.
+      // 401/403: token expired or revoked.
+      // 404: the session_id we held is gone (admin closed it, DB reseeded,
+      // etc). Same recovery: invalidate the local session, drop the stale
+      // session_token, and ask the customer to scan the QR again.
+      if (status === 401 || status === 403 || status === 404) {
+        clearSessionToken();
         setSessionInvalid(true);
         return;
       }
       console.error(err);
     });
-  }, [session, setOrders, hydrateSessionData]);
+    // Intentionally exclude `session` from deps; we only want to refire
+    // when the id changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, setOrders, hydrateSessionData]);
 
   async function handleStartSession() {
     setOpenError(null);
@@ -423,8 +550,22 @@ export default function MesaPage({
     }
   }
 
-  const disabled = myQueueCount >= MAX_SONGS_PER_TABLE;
-  const orderCreationDisabled = session?.status === "closed";
+  // Per-session song-credit ledger (shipped in the table snapshot via
+  // socket). Mirrors the backend rule: 5 base slots + 1 extra per
+  // delivered order >= $20k that hasn't been spent yet. If admin skips an
+  // extra song the credit is automatically refunded by the backend.
+  const songCredits = currentTable?.current_session?.song_credits ?? {
+    earned: 0,
+    spent: 0,
+    available: 0,
+  };
+  const effectiveLimit = effectiveSongLimit(songCredits);
+  const disabled = myQueueCount >= effectiveLimit;
+  // Order creation is locked once the customer asks for the bill. The
+  // customer can cancel the request to unlock. Paid sessions are closed,
+  // so the entry view takes over and this screen is no longer rendered.
+  const orderCreationDisabled =
+    session?.status === "closed" || !!session?.payment_requested_at;
 
   // ─── No QR token at all → "QR inválido" ──────────────────────────────────
   if (tableTokenStatus === "missing") {
@@ -489,6 +630,40 @@ export default function MesaPage({
   // ─── Active session view ─────────────────────────────────────────────────
   const sessionOrders = orders.filter((o) => o.table_session_id === session.id);
   const billTotal = bill?.summary.total ?? 0;
+  // Active orders (not yet delivered) + pending requests block "ask for
+  // bill". Mirrors the backend rule.
+  const inFlightCount =
+    sessionOrders.filter(
+      (o) =>
+        o.status === "accepted" ||
+        o.status === "preparing" ||
+        o.status === "ready",
+    ).length +
+    myRequests.filter((r) => r.status === "pending").length;
+
+  // Per-session order numbering. The backend `id` is a global autoincrement
+  // (so a fresh table sees "Pedido #47" if the bar has been busy). Customers
+  // expect "#1" for their first order of the night. We compute the local
+  // number by sorting all OrderRequests of THIS session by created_at and
+  // assigning index+1 — this stays stable across cancellations because we
+  // never re-pack the sequence; a cancelled request just leaves a gap-less
+  // human number that already shipped to the customer's screen.
+  // Orders inherit the number of their parent OrderRequest, so the customer
+  // sees the same "#3" whether they're looking at the request (En revisión)
+  // or the resulting order (En preparación / Entregados).
+  const sessionRequestsSorted = [...myRequests].sort(
+    (a, b) =>
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  );
+  const requestNumberById = new Map<number, number>();
+  sessionRequestsSorted.forEach((r, i) => requestNumberById.set(r.id, i + 1));
+  const orderNumberById = new Map<number, number>();
+  for (const o of sessionOrders) {
+    const reqNum = o.order_request_id
+      ? requestNumberById.get(o.order_request_id)
+      : undefined;
+    if (reqNum != null) orderNumberById.set(o.id, reqNum);
+  }
 
   return (
     <>
@@ -557,6 +732,7 @@ export default function MesaPage({
                 globalQueue={globalQueue}
                 tableId={tableId}
                 myQueueCount={myQueueCount}
+                effectiveLimit={effectiveLimit}
               />
             )}
 
@@ -575,11 +751,16 @@ export default function MesaPage({
                     o.status === "preparing" ||
                     o.status === "ready",
                 )}
+                requestNumberById={requestNumberById}
+                orderNumberById={orderNumberById}
                 products={products}
                 total={billTotal}
                 onOpenCart={() => setCartMode({ kind: "create" })}
                 onEditRequest={(r) => setCartMode({ kind: "edit", request: r })}
+                onOpenBill={() => setBillModalOpen(true)}
                 disableCreateOrder={orderCreationDisabled}
+                paymentRequested={!!session.payment_requested_at}
+                paid={!!session.paid_at}
               />
             )}
           </section>
@@ -599,10 +780,12 @@ export default function MesaPage({
             <RequestCTA
               disabled={disabled}
               onClick={() => setSearchOpen(true)}
+              effectiveLimit={effectiveLimit}
             />
             {disabled && (
               <p className="mesa-cta-hint">
-                Espera 15 min o consume $20 mil más para agregar otra canción
+                Haz un pedido de {fmt(EXTRA_SONG_CONSUMPTION_THRESHOLD)} o más
+                para desbloquear otra canción
               </p>
             )}
           </div>
@@ -623,11 +806,12 @@ export default function MesaPage({
               onClick={() => setSearchOpen(true)}
               mobile
               myQueueCount={myQueueCount}
+              effectiveLimit={effectiveLimit}
             />
           </div>
           {disabled && (
             <p className="mesa-cta-hint">
-              Espera 15 min o consume $20 mil más
+              Pide {fmt(EXTRA_SONG_CONSUMPTION_THRESHOLD)}+ y desbloquea otra
             </p>
           )}
         </div>
@@ -637,14 +821,17 @@ export default function MesaPage({
           open={isSearchOpen}
           onClose={() => setSearchOpen(false)}
           onAdded={() => {
+            const since = sessionStartRef.current ?? undefined;
             queueApi
-              .getByTable(tableId)
+              .getByTable(tableId, { since })
               .then((tableQueue) => {
-                updateFromSocket(buildMesaQueue(tableQueue, tableId));
+                updateFromSocket(
+                  buildMesaQueue(tableQueue, tableId, since),
+                );
               })
               .catch(console.error);
             queueApi
-              .getByTableWithHistory(tableId)
+              .getByTableWithHistory(tableId, { since })
               .then(setMySongs)
               .catch(console.error);
           }}
@@ -671,6 +858,16 @@ export default function MesaPage({
           tableSessionId={session.id}
           products={products}
         />
+
+        <CustomerBillModal
+          open={billModalOpen}
+          onClose={() => setBillModalOpen(false)}
+          bill={bill}
+          session={session}
+          inFlightCount={inFlightCount}
+        />
+
+        <MesaToastStack toasts={toasts} />
       </div>
     </>
   );
@@ -685,9 +882,6 @@ function ScoreboardPanel({
   table: Table;
   playback: PlaybackState | null;
 }) {
-  const MAX = SCOREBOARD_MAX_CONSUMPTION;
-  const pct = Math.min(100, Math.round((table.total_consumption / MAX) * 100));
-
   return (
     <div className="mesa-scoreboard">
       <div className="mesa-scoreboard-decor" aria-hidden />
@@ -702,19 +896,6 @@ function ScoreboardPanel({
       <div className="mesa-scoreboard-consumo">
         <span className="mesa-caption">Consumo</span>
         <span className="mesa-scoreboard-amount">{fmt(table.total_consumption)}</span>
-      </div>
-
-      <div className="mesa-progress-wrap">
-        <div className="mesa-progress-labels">
-          <span className="mesa-caption">Nivel de mesa</span>
-          <span className="mesa-progress-pct">{pct}%</span>
-        </div>
-        <div className="mesa-progress-track">
-          <div
-            className="mesa-progress-fill"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
       </div>
     </div>
   );
@@ -731,6 +912,13 @@ function StatusPill({ playback }: { playback: PlaybackState | null }) {
       <span className="mesa-status-text">
         {isPlaying ? "SONANDO" : "EN PAUSA"}
       </span>
+      {isPlaying && (
+        <span className="mesa-eq" aria-hidden>
+          <span />
+          <span />
+          <span />
+        </span>
+      )}
     </div>
   );
 }
@@ -746,10 +934,9 @@ function NowPlayingCard({
 
   return (
     <div className={`mesa-npcard ${compact ? "is-compact" : ""} ${isPlaying ? "is-live" : ""}`}>
+      <span className="mesa-npcard-sweep" aria-hidden />
       <div className="mesa-npcard-artwork" aria-hidden>
-        <div className="mesa-npcard-artwork-inner">
-          <span className="mesa-npcard-note">♪</span>
-        </div>
+        <div className="mesa-npcard-artwork-inner" />
       </div>
 
       <div className="mesa-npcard-body">
@@ -762,7 +949,10 @@ function NowPlayingCard({
 
         {isPlaying ? (
           <>
-            <h3 className="mesa-npcard-title">{playback.song?.title}</h3>
+            <TrackTitleMarquee
+              text={playback.song?.title ?? ""}
+              className="mesa-npcard-title"
+            />
             <p className="mesa-npcard-meta">
               {secToMin(playback.song?.duration ?? 0)} · Mesa{" "}
               {playback.table_id ? pad(playback.table_id) : "ADMIN"}
@@ -782,10 +972,12 @@ function QueueTab({
   globalQueue,
   tableId,
   myQueueCount,
+  effectiveLimit,
 }: {
   globalQueue: QueueItem[];
   tableId: number;
   myQueueCount: number;
+  effectiveLimit: number;
 }) {
   return (
     <>
@@ -795,7 +987,7 @@ function QueueTab({
         </span>
         <span className="mesa-list-head-mine">
           Tu mesa:{" "}
-          <strong>{myQueueCount}</strong>/{MAX_SONGS_PER_TABLE}
+          <strong>{myQueueCount}</strong>/{effectiveLimit}
         </span>
       </div>
 
@@ -854,19 +1046,29 @@ function QueueRow({
 function OrdersTab({
   requests,
   activeOrders,
+  requestNumberById,
+  orderNumberById,
   products,
   total,
   onOpenCart,
   onEditRequest,
+  onOpenBill,
   disableCreateOrder,
+  paymentRequested,
+  paid,
 }: {
   requests: OrderRequest[];
   activeOrders: Order[];
+  requestNumberById: Map<number, number>;
+  orderNumberById: Map<number, number>;
   products: Product[];
   total: number;
   onOpenCart: () => void;
   onEditRequest: (r: OrderRequest) => void;
+  onOpenBill: () => void;
   disableCreateOrder: boolean;
+  paymentRequested: boolean;
+  paid: boolean;
 }) {
   // Per-row state for the customer's cancel action. Local because it
   // belongs to this view and dies with it; backend is the source of truth
@@ -911,10 +1113,14 @@ function OrdersTab({
       setBusyRequestId(null);
     }
   }
+  // The customer-facing flow today is `accepted → delivered`; the
+  // intermediate states still exist on the backend (kitchen-screen ready)
+  // but never reach the customer screen, so we collapse them under the
+  // same "Aceptado" label as a defensive default.
   const statusLabel: Record<Order["status"], string> = {
     accepted: "Aceptado",
-    preparing: "Preparando",
-    ready: "Listo",
+    preparing: "Aceptado",
+    ready: "Aceptado",
     delivered: "Entregado",
     cancelled: "Cancelado",
   };
@@ -934,10 +1140,82 @@ function OrdersTab({
 
   return (
     <div className="mesa-orders">
+      {!empty && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: 14,
+            flexWrap: "wrap",
+          }}
+        >
+          {paid ? (
+            <span
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                letterSpacing: 2,
+                color: C.olive,
+                textTransform: "uppercase",
+                fontWeight: 700,
+              }}
+            >
+              ● Pagada
+            </span>
+          ) : paymentRequested ? (
+            <span
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                letterSpacing: 2,
+                color: C.gold,
+                textTransform: "uppercase",
+                fontWeight: 700,
+              }}
+            >
+              ● Cuenta solicitada
+            </span>
+          ) : (
+            <span
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                letterSpacing: 2,
+                color: C.mute,
+                textTransform: "uppercase",
+                fontWeight: 600,
+              }}
+            >
+              — Tus pedidos
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onOpenBill}
+            style={{
+              padding: "8px 14px",
+              border: `1px solid ${C.cacao}`,
+              background: C.paper,
+              color: C.ink,
+              borderRadius: 999,
+              fontFamily: FONT_DISPLAY,
+              fontSize: 12,
+              letterSpacing: 2.5,
+              cursor: "pointer",
+              textTransform: "uppercase",
+              fontWeight: 600,
+            }}
+          >
+            Ver factura
+          </button>
+        </div>
+      )}
+
       {empty && (
         <>
           <EmptyState
-            icon="☕"
             title="SIN PEDIDOS AÚN"
             body="Pide algo de la carta para empezar"
             variant="terracotta"
@@ -987,7 +1265,7 @@ function OrdersTab({
                   <div className="mesa-row-num">✎</div>
                   <div className="mesa-row-text" style={{ minWidth: 0 }}>
                     <div className="mesa-row-title">
-                      Solicitud #{r.id}
+                      Solicitud #{pad(requestNumberById.get(r.id) ?? 0)}
                     </div>
                     <div className="mesa-row-meta">
                       {itemsCount(r)}{" "}
@@ -1127,9 +1405,10 @@ function OrdersTab({
                     flexWrap: "wrap",
                   }}
                 >
-                  <div className="mesa-row-num">☕</div>
-                  <div className="mesa-row-text" style={{ minWidth: 0 }}>
-                    <div className="mesa-row-title">Pedido #{o.id}</div>
+                  <div className="mesa-row-text" style={{ minWidth: 0, flex: 1 }}>
+                    <div className="mesa-row-title">
+                      Pedido #{pad(orderNumberById.get(o.id) ?? 0)}
+                    </div>
                     <div className="mesa-row-meta">
                       {itemCount} {itemCount === 1 ? "unidad" : "unidades"} ·{" "}
                       {statusLabel[o.status]}
@@ -1181,7 +1460,7 @@ function OrdersTab({
 
       {total > 0 && (
         <div className="mesa-total-card">
-          <span className="mesa-caption">Total mesa</span>
+          <span className="mesa-total-label">Total mesa</span>
           <span className="mesa-total-amount">{fmt(total)}</span>
         </div>
       )}
@@ -1189,6 +1468,7 @@ function OrdersTab({
       {confirmingCancel && (
         <CancelConfirmModal
           request={confirmingCancel}
+          requestNumber={requestNumberById.get(confirmingCancel.id) ?? null}
           productById={productById}
           onConfirm={performCancel}
           onClose={() => setConfirmingCancel(null)}
@@ -1204,11 +1484,13 @@ function OrdersTab({
 // accident the wrong request when they have several pending.
 function CancelConfirmModal({
   request,
+  requestNumber,
   productById,
   onConfirm,
   onClose,
 }: {
   request: OrderRequest;
+  requestNumber: number | null;
   productById: Map<number, Product>;
   onConfirm: () => void;
   onClose: () => void;
@@ -1269,7 +1551,7 @@ function CancelConfirmModal({
               textTransform: "uppercase",
             }}
           >
-            Pedido #{request.id}
+            Pedido {requestNumber != null ? `#${pad(requestNumber)}` : `#${request.id}`}
           </h3>
         </div>
 
@@ -1379,14 +1661,14 @@ function EmptyState({
   body,
   variant,
 }: {
-  icon: string;
+  icon?: string;
   title: string;
   body: string;
   variant: "gold" | "terracotta";
 }) {
   return (
     <div className="mesa-empty">
-      <div className={`mesa-empty-icon is-${variant}`}>{icon}</div>
+      {icon && <div className={`mesa-empty-icon is-${variant}`}>{icon}</div>}
       <p className="mesa-empty-title">{title}</p>
       {body && <p className="mesa-empty-body">{body}</p>}
     </div>
@@ -1398,30 +1680,42 @@ function RequestCTA({
   onClick,
   mobile,
   myQueueCount,
+  effectiveLimit,
 }: {
   disabled: boolean;
   onClick: () => void;
   mobile?: boolean;
   myQueueCount?: number;
+  effectiveLimit?: number;
 }) {
+  const limit = effectiveLimit ?? MAX_SONGS_PER_TABLE;
   return (
     <button
       className={`mesa-cta ${mobile ? "is-mobile" : ""}`}
       onClick={onClick}
       disabled={disabled}
-      aria-label={disabled ? "Límite alcanzado" : "Pedir canción"}
+      aria-label={
+        disabled
+          ? "Límite alcanzado"
+          : mobile && typeof myQueueCount === "number"
+            ? `Pedir canción, ${myQueueCount} de ${limit}`
+            : "Pedir canción"
+      }
     >
       <span className="mesa-cta-label">
         {disabled ? "LÍMITE ALCANZADO" : "PEDIR CANCIÓN"}
       </span>
-      {!disabled && (
+      {/* On mobile we drop the decorative note so the count chip (which
+          replaces it) doesn't have to share the cramped CTA width. On
+          desktop the ornament stays because there is no count there. */}
+      {!disabled && !mobile && (
         <span className="mesa-cta-ornament" aria-hidden>
           ♪
         </span>
       )}
       {mobile && !disabled && typeof myQueueCount === "number" && (
         <span className="mesa-cta-count" aria-hidden>
-          {myQueueCount}/{MAX_SONGS_PER_TABLE}
+          {myQueueCount}/{limit}
         </span>
       )}
     </button>
@@ -1444,26 +1738,35 @@ function OrderProductsCTA({
       aria-label="Pedir productos"
       style={{
         width: "100%",
-        padding: mobile ? "14px 16px" : "16px 20px",
+        minWidth: 0,
+        padding: mobile ? "14px 14px" : "16px 20px",
         border: `1px solid ${disabled ? C.sandDark : C.cacao}`,
         borderRadius: 999,
         background: disabled ? C.parchment : C.paper,
         color: disabled ? C.mute : C.ink,
         fontFamily: FONT_DISPLAY,
         fontSize: mobile ? 14 : 16,
-        letterSpacing: 3,
+        letterSpacing: mobile ? 1.5 : 3,
         cursor: disabled ? "not-allowed" : "pointer",
         boxShadow: disabled ? "none" : C.shadow,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        gap: 10,
+        gap: mobile ? 8 : 10,
         textTransform: "uppercase",
         WebkitTapHighlightColor: "transparent",
       }}
     >
-      <span>Pedir productos</span>
-      <span aria-hidden>☕</span>
+      <span
+        style={{
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        Pedir productos
+      </span>
     </button>
   );
 }
@@ -1679,32 +1982,115 @@ function CustomerErrorCard({
 }
 
 // ─── Styles (all responsive rules in a single styled block) ──────────────────
+// ─── Toast stack (mesa) ───────────────────────────────────────────────────
+// Visual cousin of the admin toast: top-center, prominent, colored by tone.
+// Auto-dismiss is owned by the parent (push helper), this component is
+// purely presentational.
+function MesaToastStack({
+  toasts,
+}: {
+  toasts: { id: number; tone: "olive" | "gold" | "cacao"; message: string }[];
+}) {
+  if (toasts.length === 0) return null;
+  const palette: Record<
+    "olive" | "gold" | "cacao",
+    { border: string; iconBg: string; iconFg: string; icon: string }
+  > = {
+    olive: { border: C.olive, iconBg: C.oliveSoft, iconFg: C.olive, icon: "✓" },
+    gold: { border: C.gold, iconBg: C.goldSoft, iconFg: C.cacao, icon: "★" },
+    cacao: {
+      border: C.cacao,
+      iconBg: C.sand,
+      iconFg: C.cacao,
+      icon: "↺",
+    },
+  };
+  return (
+    <>
+      <style>{`
+        @keyframes mesa-toast-in {
+          from { opacity: 0; transform: translateY(-12px) scale(0.97); }
+          to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+      `}</style>
+      <div
+        style={{
+          position: "fixed",
+          top: 24,
+          left: "50%",
+          transform: "translateX(-50%)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+          zIndex: 80,
+          pointerEvents: "none",
+          width: "calc(100% - 32px)",
+          maxWidth: 520,
+          alignItems: "center",
+        }}
+      >
+        {toasts.map((t) => {
+          const meta = palette[t.tone];
+          return (
+            <div
+              key={t.id}
+              role="status"
+              aria-live="assertive"
+              style={{
+                pointerEvents: "auto",
+                background: C.ink,
+                color: C.paper,
+                padding: "16px 20px 16px 16px",
+                borderRadius: 14,
+                fontFamily: FONT_UI,
+                fontSize: 15,
+                fontWeight: 600,
+                letterSpacing: 0.3,
+                lineHeight: 1.35,
+                width: "100%",
+                boxShadow:
+                  "0 18px 40px -12px rgba(43,29,20,0.55), 0 4px 12px -6px rgba(107,78,46,0.4)",
+                borderLeft: `5px solid ${meta.border}`,
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+                animation:
+                  "mesa-toast-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both",
+              }}
+            >
+              <span
+                aria-hidden
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                  width: 30,
+                  height: 30,
+                  borderRadius: 999,
+                  background: meta.iconBg,
+                  color: meta.iconFg,
+                  fontFamily: FONT_DISPLAY,
+                  fontSize: 16,
+                  fontWeight: 700,
+                }}
+              >
+                {meta.icon}
+              </span>
+              <span style={{ minWidth: 0 }}>{t.message}</span>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 const styles = `
-  @keyframes crown-ping {
-    0%   { transform: scale(1);   opacity: 0.55; }
-    80%  { transform: scale(2.6); opacity: 0;    }
-    100% { transform: scale(2.6); opacity: 0;    }
-  }
-  @keyframes crown-tab-in {
-    from { transform: scaleX(0); }
-    to   { transform: scaleX(1); }
-  }
+  ${SHARED_KEYFRAMES}
 
   .mesa-root {
-    --c-cream: ${C.cream};
-    --c-parchment: ${C.parchment};
-    --c-sand: ${C.sand};
-    --c-sand-dark: ${C.sandDark};
-    --c-gold: ${C.gold};
-    --c-gold-soft: ${C.goldSoft};
-    --c-terracotta: ${C.terracotta};
-    --c-terracotta-soft: ${C.terracottaSoft};
-    --c-olive: ${C.olive};
-    --c-olive-soft: ${C.oliveSoft};
-    --c-cacao: ${C.cacao};
-    --c-ink: ${C.ink};
-    --c-mute: ${C.mute};
-    --c-paper: ${C.paper};
+    ${THEME_CSS_VARS}
 
     min-height: 100dvh;
     width: 100%;
@@ -1794,9 +2180,9 @@ const styles = `
     font-weight: 600;
   }
   .mesa-mobile-mesa-num {
-    font-family: ${FONT_DISPLAY};
-    font-size: 34px;
-    letter-spacing: -1px;
+    font-family: ${FONT_HEADING};
+    font-size: 38px;
+    letter-spacing: 0;
     color: var(--c-ink);
     line-height: 1;
   }
@@ -1864,9 +2250,9 @@ const styles = `
     text-transform: uppercase;
   }
   .mesa-status-pill.is-playing {
-    border-color: var(--c-olive-soft);
-    background: color-mix(in srgb, var(--c-olive-soft) 40%, transparent);
-    color: var(--c-olive);
+    border-color: var(--c-gold-soft);
+    background: color-mix(in srgb, var(--c-gold-soft) 40%, transparent);
+    color: var(--c-gold);
   }
   .mesa-status-dot-wrap {
     position: relative;
@@ -1891,9 +2277,31 @@ const styles = `
   .mesa-status-pill.is-playing .mesa-status-dot-ping {
     animation: crown-ping 2s ease-out infinite;
   }
+  /* Equalizer bars inside the status pill (only shown when playing). */
+  .mesa-eq {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 10px;
+    margin-left: 2px;
+  }
+  .mesa-eq span {
+    display: inline-block;
+    width: 2px;
+    height: 100%;
+    background: currentColor;
+    border-radius: 1px;
+    transform-origin: bottom;
+    will-change: transform;
+  }
+  .mesa-eq span:nth-child(1) { animation: crown-eq-1 0.9s ease-in-out infinite; }
+  .mesa-eq span:nth-child(2) { animation: crown-eq-2 1.3s ease-in-out infinite; }
+  .mesa-eq span:nth-child(3) { animation: crown-eq-3 1.1s ease-in-out infinite; }
 
   /* Now playing card */
   .mesa-npcard {
+    position: relative;
+    overflow: hidden;
     display: flex;
     gap: 14px;
     padding: 14px;
@@ -1905,34 +2313,81 @@ const styles = `
     transition: box-shadow 0.25s ease, transform 0.25s ease;
   }
   .mesa-npcard.is-live {
-    background: linear-gradient(135deg, color-mix(in srgb, var(--c-olive-soft) 55%, var(--c-paper)) 0%, var(--c-paper) 60%);
-    border-color: var(--c-olive-soft);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--c-gold-soft) 55%, var(--c-paper)) 0%, var(--c-paper) 60%);
+    border-color: var(--c-gold-soft);
+    box-shadow: 0 1px 0 rgba(43,29,20,0.04), 0 18px 40px -22px var(--c-gold);
+  }
+  /* Soft gold sweep skating across the card while playing. */
+  .mesa-npcard-sweep {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    border-radius: inherit;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+  }
+  .mesa-npcard.is-live .mesa-npcard-sweep {
+    opacity: 1;
+  }
+  .mesa-npcard-sweep::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 35%;
+    height: 100%;
+    background: linear-gradient(
+      100deg,
+      transparent 0%,
+      color-mix(in srgb, var(--c-gold) 22%, transparent) 50%,
+      transparent 100%
+    );
+    filter: blur(6px);
+    transform: translateX(-120%);
+    animation: crown-sweep 4.2s ease-in-out infinite;
   }
   .mesa-npcard-artwork {
+    position: relative;
     flex: 0 0 auto;
     width: 64px;
     height: 64px;
-    border-radius: 10px;
-    background: linear-gradient(135deg, var(--c-gold) 0%, var(--c-terracotta) 100%);
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%, var(--c-paper) 0%, var(--c-paper) 14%, transparent 14%),
+      radial-gradient(circle at 50% 50%, var(--c-cacao) 16%, var(--c-ink) 18%, var(--c-cacao) 38%, var(--c-ink) 40%, var(--c-cacao) 60%, var(--c-ink) 62%, #1a0f08 100%);
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 8px 20px -10px var(--c-gold);
+    box-shadow: 0 8px 20px -10px var(--c-cacao), inset 0 0 0 1px rgba(0,0,0,0.4);
+  }
+  .mesa-npcard.is-live .mesa-npcard-artwork {
+    animation: crown-vinyl-spin 4s linear infinite;
+  }
+  /* Center label of the vinyl */
+  .mesa-npcard-artwork::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--c-gold) 0%, var(--c-terracotta) 100%);
+    transform: translate(-50%, -50%);
+    box-shadow: inset 0 0 0 1px rgba(43,29,20,0.5);
   }
   .mesa-npcard-artwork-inner {
-    width: 46px;
-    height: 46px;
-    border-radius: 8px;
-    background: rgba(253,248,236,0.18);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    position: relative;
+    z-index: 1;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--c-paper);
+    box-shadow: 0 0 0 1px rgba(43,29,20,0.6);
   }
   .mesa-npcard-note {
-    font-family: ${FONT_DISPLAY};
-    font-size: 26px;
-    color: var(--c-paper);
-    line-height: 1;
+    display: none;
   }
   .mesa-npcard-body {
     flex: 1;
@@ -1951,7 +2406,7 @@ const styles = `
     font-family: ${FONT_MONO};
     font-size: 8px;
     letter-spacing: 2px;
-    color: var(--c-olive);
+    color: var(--c-gold);
     font-weight: 700;
   }
   .mesa-npcard-title {
@@ -1962,6 +2417,11 @@ const styles = `
     letter-spacing: 0.4px;
     margin: 2px 0 0;
     white-space: nowrap;
+    /* Soft fade on both edges so the marquee doesn't pop in/out hard. */
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+            mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  }
+  .mesa-npcard-title-static {
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -2028,7 +2488,7 @@ const styles = `
   .mesa-row:last-child { border-bottom: none; }
   .mesa-row:hover { background: var(--c-parchment); }
   .mesa-row.is-playing {
-    background: linear-gradient(90deg, color-mix(in srgb, var(--c-olive-soft) 60%, transparent) 0%, transparent 100%);
+    background: linear-gradient(90deg, color-mix(in srgb, var(--c-gold-soft) 60%, transparent) 0%, transparent 100%);
   }
   .mesa-row-num {
     width: 34px;
@@ -2044,7 +2504,7 @@ const styles = `
     flex-shrink: 0;
   }
   .mesa-row-num.is-mine { background: var(--c-gold-soft); color: var(--c-cacao); }
-  .mesa-row-num.is-playing { background: var(--c-olive); color: var(--c-paper); font-size: 16px; }
+  .mesa-row-num.is-playing { background: var(--c-gold); color: var(--c-paper); font-size: 16px; }
   .mesa-row-text {
     flex: 1;
     min-width: 0;
@@ -2148,11 +2608,19 @@ const styles = `
     border-radius: 12px;
     box-shadow: ${C.shadow};
   }
+  .mesa-total-label {
+    font-family: ${FONT_HEADING};
+    font-size: 22px;
+    color: var(--c-ink);
+    letter-spacing: 0;
+    line-height: 1;
+  }
   .mesa-total-amount {
-    font-family: ${FONT_DISPLAY};
-    font-size: 26px;
+    font-family: ${FONT_HEADING};
+    font-size: 30px;
     color: var(--c-gold);
-    letter-spacing: 1px;
+    letter-spacing: 0;
+    line-height: 1;
   }
 
   /* Mobile dock (sticky CTA) */
@@ -2191,6 +2659,22 @@ const styles = `
                 box-shadow 0.18s ease, background 0.2s ease;
     will-change: transform;
     position: relative;
+    min-width: 0;
+  }
+  /* On mobile the CTA shares its row with the products CTA, so the
+     letter-spacing and padding are tightened and the label is allowed to
+     truncate before the count chip gets pushed off the button. */
+  .mesa-cta.is-mobile {
+    padding: 14px 14px;
+    font-size: 14px;
+    letter-spacing: 1.5px;
+    gap: 8px;
+  }
+  .mesa-cta.is-mobile .mesa-cta-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .mesa-cta:hover:not(:disabled) {
     transform: translateY(-2px);
@@ -2221,14 +2705,17 @@ const styles = `
     font-size: 13px;
   }
   .mesa-cta-count {
-    position: absolute;
-    right: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
     font-family: ${FONT_MONO};
     font-size: 11px;
     letter-spacing: 1px;
     background: rgba(253,248,236,0.18);
     padding: 3px 8px;
     border-radius: 999px;
+    line-height: 1;
   }
   .mesa-cta-hint {
     text-align: center;
@@ -2268,11 +2755,11 @@ const styles = `
   }
   .mesa-scoreboard-number {
     position: relative;
-    font-family: ${FONT_DISPLAY};
-    font-size: clamp(88px, 12vw, 128px);
+    font-family: ${FONT_HEADING};
+    font-size: clamp(96px, 13vw, 144px);
     line-height: 0.85;
     color: var(--c-ink);
-    letter-spacing: -5px;
+    letter-spacing: 0;
     margin-bottom: 16px;
   }
   .mesa-scoreboard-consumo {
@@ -2283,39 +2770,11 @@ const styles = `
     margin-bottom: 22px;
   }
   .mesa-scoreboard-amount {
-    font-family: ${FONT_DISPLAY};
-    font-size: 30px;
+    font-family: ${FONT_HEADING};
+    font-size: 36px;
     color: var(--c-gold);
     letter-spacing: 1px;
   }
-  .mesa-progress-wrap { position: relative; }
-  .mesa-progress-labels {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 6px;
-  }
-  .mesa-progress-pct {
-    font-family: ${FONT_MONO};
-    font-size: 10px;
-    color: var(--c-gold);
-    font-weight: 700;
-    letter-spacing: 1px;
-  }
-  .mesa-progress-track {
-    height: 6px;
-    background: var(--c-sand);
-    overflow: hidden;
-    border-radius: 999px;
-    box-shadow: inset 0 1px 2px rgba(43,29,20,0.08);
-  }
-  .mesa-progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, var(--c-gold) 0%, var(--c-terracotta) 100%);
-    transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-    border-radius: 999px;
-    box-shadow: 0 0 12px rgba(184,137,74,0.4);
-  }
-
   /* ─── DESKTOP (≥ 1024px) — 3-column full-bleed ─────────────────────────── */
 
   @media (min-width: 1024px) {
@@ -2455,7 +2914,7 @@ const styles = `
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .mesa-cta, .mesa-row, .mesa-tab, .mesa-progress-fill, .mesa-npcard {
+    .mesa-cta, .mesa-row, .mesa-tab, .mesa-npcard {
       transition: none !important;
     }
     .mesa-status-dot-ping { animation: none !important; }

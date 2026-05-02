@@ -50,7 +50,7 @@ function getWaitMessage(item: QueueItem, allQueue: QueueItem[]): string {
 function getStatusLabel(status: string) {
   switch (status) {
     case "playing":
-      return { text: "SONANDO", color: C.olive };
+      return { text: "SONANDO", color: C.gold };
     case "pending":
       return { text: "EN COLA", color: C.gold };
     case "skipped":
@@ -82,6 +82,7 @@ export function MySongsPanel({
 
   return (
     <div style={{ padding: "16px 0" }}>
+      <style>{mysongsStyles}</style>
       <div
         style={{
           fontFamily: FONT_MONO,
@@ -161,44 +162,66 @@ export function MySongsPanel({
                 alignItems: "flex-start",
                 borderBottom: `1px solid ${C.sand}`,
                 background: isPlaying
-                  ? `linear-gradient(90deg, color-mix(in srgb, ${C.oliveSoft} 60%, transparent) 0%, transparent 100%)`
+                  ? `linear-gradient(90deg, color-mix(in srgb, ${C.goldSoft} 60%, transparent) 0%, transparent 100%)`
                   : "transparent",
                 transition: "background 0.2s ease",
               }}
             >
-              <div
-                style={{
-                  width: 36,
-                  minWidth: 36,
-                  height: 36,
-                  borderRadius: 8,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  background: isPlaying ? C.olive : C.goldSoft,
-                  color: isPlaying ? C.paper : C.cacao,
-                  fontFamily: FONT_DISPLAY,
-                  fontSize: isPlaying ? 18 : 14,
-                  letterSpacing: 0,
-                }}
-              >
-                {isPlaying ? "▶" : `#${item.position}`}
-              </div>
+              {isPlaying ? (
+                <span className="mysongs-vinyl" aria-hidden />
+              ) : (
+                <div
+                  style={{
+                    width: 36,
+                    minWidth: 36,
+                    height: 36,
+                    borderRadius: 8,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: C.goldSoft,
+                    color: C.cacao,
+                    fontFamily: FONT_DISPLAY,
+                    fontSize: 14,
+                    letterSpacing: 0,
+                  }}
+                >
+                  {`#${item.position}`}
+                </div>
+              )}
 
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div
                   style={{
-                    fontFamily: FONT_DISPLAY,
-                    fontSize: 15,
-                    color: C.ink,
-                    letterSpacing: 0.3,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    lineHeight: 1.2,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    minWidth: 0,
                   }}
                 >
-                  {item.song?.title ?? `Song ${item.song_id}`}
+                  <div
+                    style={{
+                      fontFamily: FONT_DISPLAY,
+                      fontSize: 15,
+                      color: C.ink,
+                      letterSpacing: 0.3,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      lineHeight: 1.2,
+                      flex: 1,
+                      minWidth: 0,
+                    }}
+                  >
+                    {item.song?.title ?? `Song ${item.song_id}`}
+                  </div>
+                  {isPlaying && (
+                    <span className="mysongs-eq" aria-hidden>
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                  )}
                 </div>
                 <div
                   style={{
@@ -218,16 +241,27 @@ export function MySongsPanel({
                       color: status.color,
                       letterSpacing: 1.5,
                       fontWeight: 700,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
                     }}
                   >
-                    ● {status.text}
+                    {isPlaying ? (
+                      <span className="mysongs-dot" aria-hidden>
+                        <span className="mysongs-dot-ping" />
+                        <span className="mysongs-dot-core" />
+                      </span>
+                    ) : (
+                      "●"
+                    )}
+                    {status.text}
                   </span>
                 </div>
                 <div
                   aria-live="polite"
                   style={{
                     fontSize: 11,
-                    color: isPlaying ? C.olive : C.cacao,
+                    color: isPlaying ? C.gold : C.cacao,
                     fontFamily: FONT_MONO,
                     marginTop: 6,
                     letterSpacing: 0.5,
@@ -341,3 +375,108 @@ export function MySongsPanel({
     </div>
   );
 }
+
+const mysongsStyles = `
+  @keyframes mysongs-vinyl-spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes mysongs-eq-1 {
+    0%, 100% { transform: scaleY(0.3); }
+    50%      { transform: scaleY(1);   }
+  }
+  @keyframes mysongs-eq-2 {
+    0%, 100% { transform: scaleY(0.55); }
+    50%      { transform: scaleY(0.2);  }
+  }
+  @keyframes mysongs-eq-3 {
+    0%, 100% { transform: scaleY(0.8);  }
+    50%      { transform: scaleY(0.35); }
+  }
+  @keyframes mysongs-ping {
+    0%   { transform: scale(1);   opacity: 0.6; }
+    80%  { transform: scale(2.4); opacity: 0;   }
+    100% { transform: scale(2.4); opacity: 0;   }
+  }
+  /* Mini vinyl record next to the playing track. Same DNA as the
+     NowPlayingCard artwork but smaller — keeps the visual language
+     consistent across the mesa view. */
+  .mysongs-vinyl {
+    position: relative;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%, ${C.paper} 0%, ${C.paper} 12%, transparent 12%),
+      radial-gradient(circle at 50% 50%, ${C.cacao} 14%, ${C.ink} 16%, ${C.cacao} 36%, ${C.ink} 38%, ${C.cacao} 58%, ${C.ink} 60%, #1a0f08 100%);
+    box-shadow: 0 4px 10px -6px ${C.cacao}, inset 0 0 0 1px rgba(0,0,0,0.4);
+    animation: mysongs-vinyl-spin 4s linear infinite;
+    flex-shrink: 0;
+  }
+  .mysongs-vinyl::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, ${C.gold} 0%, #C9944F 100%);
+    transform: translate(-50%, -50%);
+    box-shadow: inset 0 0 0 1px rgba(43,29,20,0.5);
+  }
+  .mysongs-vinyl::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: ${C.paper};
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 1px rgba(43,29,20,0.6);
+    z-index: 1;
+  }
+  /* Equalizer bars next to the title. */
+  .mysongs-eq {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+    flex-shrink: 0;
+    color: ${C.gold};
+  }
+  .mysongs-eq span {
+    display: inline-block;
+    width: 2px;
+    height: 100%;
+    background: currentColor;
+    border-radius: 1px;
+    transform-origin: bottom;
+    will-change: transform;
+  }
+  .mysongs-eq span:nth-child(1) { animation: mysongs-eq-1 0.9s ease-in-out infinite; }
+  .mysongs-eq span:nth-child(2) { animation: mysongs-eq-2 1.3s ease-in-out infinite; }
+  .mysongs-eq span:nth-child(3) { animation: mysongs-eq-3 1.1s ease-in-out infinite; }
+  /* Pulsing dot replacing the static "●" in the SONANDO label. */
+  .mysongs-dot {
+    position: relative;
+    display: inline-flex;
+    width: 7px;
+    height: 7px;
+  }
+  .mysongs-dot-core {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .mysongs-dot-ping {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: currentColor;
+    animation: mysongs-ping 2s ease-out infinite;
+  }
+`;

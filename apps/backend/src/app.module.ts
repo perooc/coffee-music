@@ -13,6 +13,7 @@ import { TableProjectionModule } from "./modules/table-projection/table-projecti
 import { TableSessionsModule } from "./modules/table-sessions/table-sessions.module";
 import { TablesModule } from "./modules/tables/tables.module";
 import { MusicModule } from "./modules/music/music.module";
+import { HousePlaylistModule } from "./modules/house-playlist/house-playlist.module";
 import { rateLimitMiddleware } from "./common/rate-limit.middleware";
 import { loggingMiddleware } from "./common/logging.middleware";
 import { PlaybackModule } from "./modules/playback/playback.module";
@@ -24,6 +25,7 @@ import { PlaybackModule } from "./modules/playback/playback.module";
     DatabaseModule,
     HealthModule,
     MusicModule,
+    HousePlaylistModule,
     OrderRequestsModule,
     OrdersModule,
     ProductsModule,
@@ -51,6 +53,7 @@ export class AppModule implements NestModule {
         { path: "order-requests", method: RequestMethod.ALL },
         { path: "music/search", method: RequestMethod.ALL },
         { path: "table-sessions/open", method: RequestMethod.POST },
+        { path: "public/tables/(.*)", method: RequestMethod.ALL },
         { path: "bill/:sessionId/adjustments", method: RequestMethod.POST },
         { path: "consumptions/:id/refund", method: RequestMethod.POST },
       );

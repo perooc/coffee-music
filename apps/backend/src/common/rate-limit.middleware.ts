@@ -19,6 +19,11 @@ const rules: RuleSet = {
   // counted separately, so the bucket key prefers user_id when present.
   "/api/bill-adjustments": { windowMs: 60_000, max: 20 },
   "/api/refunds": { windowMs: 60_000, max: 10 },
+  // Temporary public table picker: 60 attempts/min by IP. Generous enough
+  // that a real customer never hits it (typo retries + auto-refresh of
+  // the available list while picking) but still capped so a bot can't
+  // spray the bar-code dictionary at line-rate.
+  "/api/public/tables": { windowMs: 60_000, max: 60 },
 };
 
 type Bucket = number[];
@@ -84,6 +89,11 @@ function findRule(path: string): { rule: RateLimitRule; bucketPath: string } | n
     return {
       rule: rules["/api/table-sessions/open"],
       bucketPath: "/api/table-sessions/open",
+    };
+  if (path.startsWith("/api/public/tables"))
+    return {
+      rule: rules["/api/public/tables"],
+      bucketPath: "/api/public/tables",
     };
   // /api/bill/:sessionId/adjustments — match the action, not the session id.
   if (/^\/api\/bill\/\d+\/adjustments/.test(path))

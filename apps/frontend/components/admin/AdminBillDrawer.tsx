@@ -14,9 +14,9 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { useSocket } from "@/lib/socket/useSocket";
-import { billApi } from "@/lib/api/services";
+import { billApi, tableSessionsApi } from "@/lib/api/services";
 import { getErrorMessage } from "@/lib/errors";
-import type { BillView, Consumption } from "@coffee-bar/shared";
+import type { BillView, Consumption, TableSession } from "@coffee-bar/shared";
 
 const fmt = (n: number) =>
   new Intl.NumberFormat("es-CO", {
@@ -43,7 +43,7 @@ const C = {
   mute: "#A89883",
 };
 const FONT_DISPLAY = "var(--font-bebas)";
-const FONT_MONO = "var(--font-oswald)";
+const FONT_MONO = "var(--font-manrope)";
 const FONT_UI = "var(--font-manrope)";
 
 type ActionKind = "adjustment" | "discount" | "refund";
@@ -62,7 +62,12 @@ export function AdminBillDrawer({
   tableNumber,
 }: Props) {
   const [bill, setBill] = useState<BillView | null>(null);
+  const [session, setSession] = useState<TableSession | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [paymentBusy, setPaymentBusy] = useState<
+    "mark-paid" | "close" | null
+  >(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
 
   const [actionOpen, setActionOpen] = useState<null | {
     kind: ActionKind;
@@ -70,18 +75,31 @@ export function AdminBillDrawer({
     defaultDescription?: string;
   }>(null);
 
+  const [confirmOpen, setConfirmOpen] = useState<null | {
+    kind: "mark-paid" | "close";
+  }>(null);
+
   const load = useCallback(() => {
     if (sessionId == null) return;
     setLoadError(null);
+    setPaymentError(null);
     billApi
       .getForAdmin(sessionId)
       .then(setBill)
+      .catch((e: unknown) => setLoadError(getErrorMessage(e)));
+    tableSessionsApi
+      .getById(sessionId)
+      .then(setSession)
       .catch((e: unknown) => setLoadError(getErrorMessage(e)));
   }, [sessionId]);
 
   useEffect(() => {
     if (open && sessionId != null) load();
-    if (!open) setBill(null);
+    if (!open) {
+      setBill(null);
+      setSession(null);
+      setPaymentError(null);
+    }
   }, [open, sessionId, load]);
 
   // Subscribe to bill updates for this session. Filter by session_id to avoid
@@ -91,7 +109,41 @@ export function AdminBillDrawer({
     onBillUpdated: (b) => {
       if (sessionId != null && b.session_id === sessionId) setBill(b);
     },
+    onTableSessionUpdated: (s) => {
+      if (sessionId != null && s.id === sessionId) {
+        // Merge instead of replace: the socket payload is `Partial<TableSession>`
+        // and we want to keep the rest of the row.
+        setSession((prev) => (prev ? { ...prev, ...s } : prev));
+      }
+    },
+    onTableSessionClosed: (s) => {
+      if (sessionId != null && s.id === sessionId) {
+        setSession((prev) => (prev ? { ...prev, ...s } : prev));
+      }
+    },
   });
+
+  async function runPaymentAction(kind: "mark-paid" | "close") {
+    if (sessionId == null) return;
+    setPaymentBusy(kind);
+    setPaymentError(null);
+    try {
+      if (kind === "mark-paid") {
+        // markPaid now closes the session in the same transaction. The
+        // socket event will mark the bill `closed`; close the drawer so
+        // staff jump back to the table grid.
+        await tableSessionsApi.markPaid(sessionId);
+        onClose();
+      } else {
+        await tableSessionsApi.close(sessionId);
+        onClose();
+      }
+    } catch (err) {
+      setPaymentError(getErrorMessage(err));
+    } finally {
+      setPaymentBusy(null);
+    }
+  }
 
   if (!open || sessionId == null) return null;
 
@@ -181,23 +233,92 @@ export function AdminBillDrawer({
               borderTop: `1px solid ${C.sand}`,
               background: C.cream,
               display: "flex",
+              flexDirection: "column",
               gap: 10,
             }}
           >
-            <button
-              type="button"
-              onClick={() => setActionOpen({ kind: "adjustment" })}
-              style={adjustmentButtonStyle(C.gold)}
+            {paymentError && (
+              <p
+                role="alert"
+                style={{
+                  margin: 0,
+                  fontFamily: FONT_MONO,
+                  fontSize: 11,
+                  color: C.burgundy,
+                  letterSpacing: 1.5,
+                  textTransform: "uppercase",
+                }}
+              >
+                {paymentError}
+              </p>
+            )}
+            {session?.payment_requested_at && (
+              <div
+                style={{
+                  padding: "8px 10px",
+                  background: C.goldSoft,
+                  border: `1px solid ${C.gold}`,
+                  borderRadius: 8,
+                  fontFamily: FONT_MONO,
+                  fontSize: 11,
+                  color: C.cacao,
+                  letterSpacing: 1,
+                  textTransform: "uppercase",
+                  fontWeight: 700,
+                }}
+              >
+                ★ Cliente pidió la cuenta
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => setActionOpen({ kind: "adjustment" })}
+                style={adjustmentButtonStyle(C.gold)}
+              >
+                + Cargo
+              </button>
+              <button
+                type="button"
+                onClick={() => setActionOpen({ kind: "discount" })}
+                style={adjustmentButtonStyle(C.cacao)}
+              >
+                − Descuento
+              </button>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+                paddingTop: 10,
+                borderTop: `1px solid ${C.sand}`,
+              }}
             >
-              + Cargo manual
-            </button>
-            <button
-              type="button"
-              onClick={() => setActionOpen({ kind: "discount" })}
-              style={adjustmentButtonStyle(C.cacao)}
-            >
-              − Descuento
-            </button>
+              <button
+                type="button"
+                onClick={() => setConfirmOpen({ kind: "mark-paid" })}
+                disabled={paymentBusy != null}
+                style={primaryActionStyle(
+                  paymentBusy === "mark-paid",
+                  C.olive,
+                )}
+              >
+                {paymentBusy === "mark-paid"
+                  ? "Cobrando..."
+                  : "Cobrar y cerrar mesa"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmOpen({ kind: "close" })}
+                disabled={paymentBusy != null}
+                style={secondaryActionStyle(paymentBusy === "close")}
+              >
+                {paymentBusy === "close" ? "Cerrando..." : "Cerrar sin cobrar"}
+              </button>
+            </div>
           </footer>
         )}
 
@@ -231,6 +352,34 @@ export function AdminBillDrawer({
             setActionOpen(null);
             // bill:updated will refresh the drawer; no manual refetch.
           }}
+        />
+      )}
+
+      {confirmOpen && (
+        <ConfirmModal
+          tone={confirmOpen.kind === "mark-paid" ? "olive" : "burgundy"}
+          eyebrow={
+            confirmOpen.kind === "mark-paid" ? "— Cobrar mesa" : "— Cerrar mesa"
+          }
+          title={
+            confirmOpen.kind === "mark-paid"
+              ? "¿Cobrar y cerrar mesa?"
+              : "¿Cerrar sin cobrar?"
+          }
+          body={
+            confirmOpen.kind === "mark-paid"
+              ? "La sesión se cerrará y la mesa quedará disponible."
+              : "El total quedará sin pagar y la sesión se cerrará."
+          }
+          confirmLabel={
+            confirmOpen.kind === "mark-paid" ? "Sí, cobrar" : "Sí, cerrar"
+          }
+          onConfirm={() => {
+            const kind = confirmOpen.kind;
+            setConfirmOpen(null);
+            runPaymentAction(kind);
+          }}
+          onCancel={() => setConfirmOpen(null)}
         />
       )}
     </div>
@@ -892,4 +1041,176 @@ function adjustmentButtonStyle(borderColor: string): React.CSSProperties {
     cursor: "pointer",
     textTransform: "uppercase",
   };
+}
+
+function primaryActionStyle(busy: boolean, accent: string): React.CSSProperties {
+  return {
+    flex: 1,
+    padding: "12px 14px",
+    border: "none",
+    borderRadius: 999,
+    background: busy ? C.sand : accent,
+    color: busy ? C.mute : C.paper,
+    fontFamily: FONT_DISPLAY,
+    fontSize: 13,
+    letterSpacing: 2.5,
+    cursor: busy ? "not-allowed" : "pointer",
+    textTransform: "uppercase",
+    fontWeight: 600,
+    opacity: busy ? 0.7 : 1,
+  };
+}
+
+function secondaryActionStyle(busy: boolean): React.CSSProperties {
+  return {
+    flex: 1,
+    padding: "10px 14px",
+    border: `1px solid ${C.burgundy}`,
+    borderRadius: 999,
+    background: C.paper,
+    color: C.burgundy,
+    fontFamily: FONT_MONO,
+    fontSize: 11,
+    letterSpacing: 2,
+    cursor: busy ? "not-allowed" : "pointer",
+    textTransform: "uppercase",
+    fontWeight: 700,
+    opacity: busy ? 0.6 : 1,
+  };
+}
+
+function ConfirmModal({
+  tone,
+  eyebrow,
+  title,
+  body,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+}: {
+  tone: "olive" | "burgundy";
+  eyebrow: string;
+  title: string;
+  body: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const accent = tone === "olive" ? C.olive : C.burgundy;
+  return (
+    <div
+      role="dialog"
+      aria-modal
+      aria-label={title}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(43,29,20,0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 80,
+        padding: 20,
+      }}
+      onClick={onCancel}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 400,
+          background: C.paper,
+          borderRadius: 16,
+          padding: 22,
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+          boxShadow: "0 30px 80px -20px rgba(43,29,20,0.45)",
+        }}
+      >
+        <div>
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              letterSpacing: 3,
+              color: accent,
+              textTransform: "uppercase",
+              fontWeight: 700,
+            }}
+          >
+            {eyebrow}
+          </span>
+          <h3
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontSize: 24,
+              letterSpacing: 0.5,
+              color: C.ink,
+              margin: "4px 0 0",
+            }}
+          >
+            {title}
+          </h3>
+        </div>
+        <p
+          style={{
+            margin: 0,
+            fontFamily: FONT_UI,
+            fontSize: 14,
+            lineHeight: 1.5,
+            color: C.cacao,
+          }}
+        >
+          {body}
+        </p>
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            justifyContent: "flex-end",
+            marginTop: 6,
+          }}
+        >
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{
+              padding: "10px 18px",
+              border: `1px solid ${C.sand}`,
+              background: "transparent",
+              color: C.cacao,
+              borderRadius: 999,
+              fontFamily: FONT_MONO,
+              fontSize: 11,
+              letterSpacing: 2,
+              cursor: "pointer",
+              textTransform: "uppercase",
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            style={{
+              padding: "10px 22px",
+              border: "none",
+              borderRadius: 999,
+              background: accent,
+              color: C.paper,
+              fontFamily: FONT_DISPLAY,
+              fontSize: 13,
+              letterSpacing: 2.5,
+              cursor: "pointer",
+              textTransform: "uppercase",
+              fontWeight: 600,
+            }}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

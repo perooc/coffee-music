@@ -65,8 +65,12 @@ function getSocket(): Socket {
       console.warn("[Socket] desconectado →", reason);
     });
 
+    // Transient connect errors (browser suspended the tab, brief network
+    // hiccup, etc.) are expected — socket.io will reconnect on its own.
+    // We only want a hard failure surface, so log at debug level here and
+    // escalate only if `reconnect_failed` actually fires.
     socket.on("connect_error", (err) => {
-      console.error("[Socket] error de conexión →", err.message);
+      console.debug("[Socket] error de conexión →", err.message);
     });
 
     socket.io.on("reconnect", (attempt) => {
@@ -75,8 +79,12 @@ function getSocket(): Socket {
 
     socket.io.on("reconnect_attempt", (attempt) => {
       if (attempt <= 3 || attempt % 5 === 0) {
-        console.log(`[Socket] reintentando conexión (intento ${attempt})...`);
+        console.debug(`[Socket] reintentando conexión (intento ${attempt})...`);
       }
+    });
+
+    socket.io.on("reconnect_failed", () => {
+      console.error("[Socket] no se pudo reconectar — se rinde");
     });
   }
   return socket;

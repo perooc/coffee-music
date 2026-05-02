@@ -7,10 +7,12 @@ import {
   MAX_SONG_DURATION_SECONDS,
   MAX_SONGS_PER_TABLE,
   EXTRA_SONG_CONSUMPTION_THRESHOLD,
-  QUEUE_LIMIT_COOLDOWN_MINUTES,
+  makeSongCredits,
+  type SongCredits,
 } from "@coffee-bar/shared";
 import { PlaybackService } from "../playback/playback.service";
 import { FairnessService } from "./fairness.service";
+import { HousePlaylistService } from "../house-playlist/house-playlist.service";
 
 const queueInclude = {
   song: true,
@@ -26,12 +28,20 @@ export class QueueService {
     private readonly realtimeGateway: RealtimeGateway,
     private readonly playbackService: PlaybackService,
     private readonly fairnessService: FairnessService,
+    private readonly housePlaylist: HousePlaylistService,
   ) {}
 
   async findGlobal() {
+    // House items are hidden from the public queue when pending — the bar's
+    // fallback playlist should not feel like a "what's coming up" list to
+    // the customers. The currently-playing item IS shown regardless of
+    // source, so the customer can see what's on the speakers right now.
     const items = await this.prisma.queueItem.findMany({
       where: {
-        status: { in: [QueueStatus.pending, QueueStatus.playing] },
+        OR: [
+          { status: QueueStatus.playing },
+          { status: QueueStatus.pending, source: "customer" },
+        ],
       },
       include: queueInclude,
       orderBy: [{ position: "asc" }],
@@ -40,12 +50,21 @@ export class QueueService {
     return items.map((item) => this.serializeQueueItem(item));
   }
 
-  async findByTable(tableId: number, includeHistory = false) {
+  async findByTable(
+    tableId: number,
+    includeHistory = false,
+    since?: Date,
+  ) {
+    // Optional `since` filter trims results to items created on/after that
+    // timestamp. The customer view passes its session.opened_at so the
+    // queue never leaks rows from a previous occupant of the same table.
+    const sinceWhere = since ? { created_at: { gte: since } } : {};
     if (!includeHistory) {
       const items = await this.prisma.queueItem.findMany({
         where: {
           table_id: tableId,
           status: { in: [QueueStatus.pending, QueueStatus.playing] },
+          ...sinceWhere,
         },
         include: queueInclude,
         orderBy: [{ position: "asc" }],
@@ -59,6 +78,7 @@ export class QueueService {
         where: {
           table_id: tableId,
           status: { in: [QueueStatus.pending, QueueStatus.playing] },
+          ...sinceWhere,
         },
         include: queueInclude,
         orderBy: [{ position: "asc" }],
@@ -67,6 +87,7 @@ export class QueueService {
         where: {
           table_id: tableId,
           status: { in: [QueueStatus.played, QueueStatus.skipped] },
+          ...sinceWhere,
         },
         include: queueInclude,
         orderBy: [{ updated_at: "desc" }],
@@ -230,8 +251,14 @@ export class QueueService {
       });
     }
 
-    // Validate max songs per table (pending + playing)
-    // Adjust limit based on how many tables are competing
+    // Per-table song limit:
+    //   - 5 songs free.
+    //   - Each additional song requires one "song credit", earned by a
+    //     SINGLE delivered order >= EXTRA_SONG_CONSUMPTION_THRESHOLD in
+    //     the current open session. Two small orders that add up to the
+    //     threshold do NOT earn a credit.
+    //   - When admin skips an extra song, the credit returns automatically
+    //     (the spent-count excludes `skipped`).
     const activeSongsCount = await this.prisma.queueItem.count({
       where: {
         table_id,
@@ -239,44 +266,19 @@ export class QueueService {
       },
     });
 
-    const activeTablesWithQueue = await this.prisma.queueItem.findMany({
-      where: { status: { in: [QueueStatus.pending, QueueStatus.playing] }, table_id: { not: null } },
-      select: { table_id: true },
-      distinct: ["table_id"],
-    });
-    const activeTableCount = activeTablesWithQueue.length;
-
-    // If only 1 table active: no limit (they're alone, let them queue freely)
-    // If 2+ tables: apply limit with unlock options
-    if (activeTableCount >= 2 && activeSongsCount >= MAX_SONGS_PER_TABLE) {
-      const baseConsumption = MAX_SONGS_PER_TABLE * EXTRA_SONG_CONSUMPTION_THRESHOLD;
-      const extraSlotsFromConsumption = Math.floor(
-        Math.max(0, this.toNumber(table.total_consumption) - baseConsumption) /
-          EXTRA_SONG_CONSUMPTION_THRESHOLD,
-      );
-      const effectiveLimit = MAX_SONGS_PER_TABLE + extraSlotsFromConsumption;
-
-      if (activeSongsCount >= effectiveLimit) {
-        const lastAdded = await this.prisma.queueItem.findFirst({
-          where: { table_id, status: { in: [QueueStatus.pending, QueueStatus.playing] } },
-          orderBy: { queued_at: "desc" },
-          select: { queued_at: true },
+    let willBeExtra = false;
+    if (activeSongsCount >= MAX_SONGS_PER_TABLE) {
+      const credits = await this.computeSongCreditsForTable(table_id);
+      if (credits.available <= 0) {
+        throw new BadRequestException({
+          message:
+            `Ya tienes ${MAX_SONGS_PER_TABLE} canciones en cola. Haz un pedido de $${(
+              EXTRA_SONG_CONSUMPTION_THRESHOLD / 1000
+            ).toFixed(0)} mil o más para desbloquear otra.`,
+          code: "QUEUE_LIMIT_REACHED",
         });
-
-        const cooldownExpired = lastAdded
-          ? Date.now() - lastAdded.queued_at.getTime() > QUEUE_LIMIT_COOLDOWN_MINUTES * 60 * 1000
-          : true;
-
-        if (!cooldownExpired) {
-          const minLeft = Math.ceil(
-            (QUEUE_LIMIT_COOLDOWN_MINUTES * 60 * 1000 - (Date.now() - lastAdded!.queued_at.getTime())) / 60_000,
-          );
-          throw new BadRequestException({
-            message: `Has alcanzado el límite de canciones. Espera ${minLeft} min o consume $${(EXTRA_SONG_CONSUMPTION_THRESHOLD / 1000).toFixed(0)} mil más para agregar otra`,
-            code: "QUEUE_LIMIT_REACHED",
-          });
-        }
       }
+      willBeExtra = true;
     }
 
     // Validate no duplicate: song not already pending/playing from any table
@@ -364,6 +366,7 @@ export class QueueService {
           priority_score: safeScore,
           status: QueueStatus.pending,
           position: 9999,
+          is_extra: willBeExtra,
         },
         include: queueInclude,
       });
@@ -409,11 +412,7 @@ export class QueueService {
 
       await this.compactPositions(tx);
 
-      const nextItem = await tx.queueItem.findFirst({
-        where: { status: QueueStatus.pending },
-        include: queueInclude,
-        orderBy: { position: "asc" },
-      });
+      const nextItem = await this.pickNextPlayable(tx);
 
       if (!nextItem) return null;
 
@@ -522,12 +521,8 @@ export class QueueService {
 
       await this.compactPositions(tx);
 
-      // 2. Find and promote next pending item
-      const nextItem = await tx.queueItem.findFirst({
-        where: { status: QueueStatus.pending },
-        include: queueInclude,
-        orderBy: { position: "asc" },
-      });
+      // 2. Find and promote next pending item (customer first, then house)
+      const nextItem = await this.pickNextPlayable(tx);
 
       if (!nextItem) return null;
 
@@ -573,12 +568,8 @@ export class QueueService {
 
       await this.compactPositions(tx);
 
-      // 2. Find and promote next pending item
-      const nextItem = await tx.queueItem.findFirst({
-        where: { status: QueueStatus.pending },
-        include: queueInclude,
-        orderBy: { position: "asc" },
-      });
+      // 2. Find and promote next pending item (customer first, then house)
+      const nextItem = await this.pickNextPlayable(tx);
 
       if (!nextItem) return null;
 
@@ -731,6 +722,74 @@ export class QueueService {
     return this.serializeQueueItem(result);
   }
 
+  /**
+   * Song credits earned/spent in the table's CURRENT open session.
+   *
+   *   earned = delivered orders (this session) whose subtotal >= threshold
+   *   spent  = QueueItems flagged is_extra in pending/playing/played state
+   *            (excludes `skipped` so admin-skipped extras refund the credit)
+   *
+   * Returned via `effectiveSongLimit` to the customer + projection snapshot
+   * so the UI never disables the button while the server would still allow
+   * the request.
+   *
+   * If the table has no open session, returns zero credits.
+   */
+  async computeSongCreditsForTable(tableId: number): Promise<SongCredits> {
+    const table = await this.prisma.table.findUnique({
+      where: { id: tableId },
+      select: { current_session_id: true },
+    });
+    if (!table?.current_session_id) {
+      return makeSongCredits(0, 0);
+    }
+    const session = await this.prisma.tableSession.findUnique({
+      where: { id: table.current_session_id },
+      select: { id: true, opened_at: true },
+    });
+    if (!session) {
+      return makeSongCredits(0, 0);
+    }
+
+    // Earned credits: delivered orders this session with subtotal >= threshold.
+    // Subtotal = sum(unit_price * quantity) over order_items.
+    const deliveredOrders = await this.prisma.order.findMany({
+      where: {
+        table_session_id: session.id,
+        status: "delivered",
+      },
+      select: {
+        order_items: {
+          select: { unit_price: true, quantity: true },
+        },
+      },
+    });
+    let earned = 0;
+    for (const order of deliveredOrders) {
+      const subtotal = order.order_items.reduce(
+        (acc, it) => acc + this.toNumber(it.unit_price) * it.quantity,
+        0,
+      );
+      if (subtotal >= EXTRA_SONG_CONSUMPTION_THRESHOLD) earned += 1;
+    }
+
+    // Spent credits: queue items flagged is_extra, scoped to this session
+    // by created_at >= opened_at. Skipped items are excluded so admin-skip
+    // returns the credit.
+    const spent = await this.prisma.queueItem.count({
+      where: {
+        table_id: tableId,
+        is_extra: true,
+        created_at: { gte: session.opened_at },
+        status: {
+          in: [QueueStatus.pending, QueueStatus.playing, QueueStatus.played],
+        },
+      },
+    });
+
+    return makeSongCredits(earned, spent);
+  }
+
   private serializeQueueItem(item: QueueRecord) {
     return {
       ...item,
@@ -761,6 +820,85 @@ export class QueueService {
         data: { position: i + 1 },
       });
     }
+  }
+
+  /**
+   * Picks the next pending QueueItem to promote to `playing`. Customer
+   * songs always win (priority over house). When there's no pending
+   * customer queue item AND no pending house queue item, the bar falls
+   * back to the curated house playlist: we synthesize a `Song` row for the
+   * picked HousePlaylistItem (idempotent on youtube_id) and create a
+   * QueueItem with source='house', table_id=null, priority_score=0.
+   *
+   * Returns the QueueItem ready to be marked playing, or null when even
+   * the house playlist has no active items (truly silent bar).
+   */
+  private async pickNextPlayable(
+    tx: Prisma.TransactionClient,
+  ): Promise<QueueRecord | null> {
+    // 1. Customer-first
+    const customerNext = await tx.queueItem.findFirst({
+      where: {
+        status: QueueStatus.pending,
+        source: "customer",
+      },
+      include: queueInclude,
+      orderBy: { position: "asc" },
+    });
+    if (customerNext) return customerNext;
+
+    // 2. House-pending (already loaded earlier, never started)
+    const houseNext = await tx.queueItem.findFirst({
+      where: {
+        status: QueueStatus.pending,
+        source: "house",
+      },
+      include: queueInclude,
+      orderBy: { position: "asc" },
+    });
+    if (houseNext) return houseNext;
+
+    // 3. Pull a fresh house song from the curated playlist.
+    const houseItem = await this.housePlaylist.pickNextHouseSong();
+    if (!houseItem) return null;
+
+    // Reuse the Song row if we've ingested this youtube_id before; else
+    // create one. House items are not bound to a table.
+    const song = await this.findOrCreateSong({
+      youtube_id: houseItem.youtube_id,
+      title: houseItem.title,
+      duration: houseItem.duration,
+      table_id: null,
+    });
+
+    // Find the highest current position so we slot in at the end. We
+    // compactPositions later anyway, but starting from the tail keeps
+    // the create from clashing with active items.
+    const last = await tx.queueItem.findFirst({
+      where: { status: { in: [QueueStatus.playing, QueueStatus.pending] } },
+      orderBy: { position: "desc" },
+      select: { position: true },
+    });
+    const created = await tx.queueItem.create({
+      data: {
+        song_id: song.id,
+        table_id: null,
+        priority_score: 0,
+        status: QueueStatus.pending,
+        position: (last?.position ?? 0) + 1,
+        source: "house",
+        is_extra: false,
+      },
+      include: queueInclude,
+    });
+
+    // Stamp last_played_at on the playlist item so the rotation moves on.
+    // Stamping at promote-time (not finish-time) means a skipped house
+    // song still rotates — better than hammering the same song forever
+    // if it gets repeatedly skipped for any reason.
+    await this.housePlaylist.stampPlayed(houseItem.id);
+
+    return created;
   }
 
   private async broadcastQueueUpdate() {

@@ -44,7 +44,16 @@ const sessionRoom = (sessionId: number) => `tableSession:${sessionId}`;
  */
 @WebSocketGateway({
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    // Match the HTTP CORS rule in main.ts: support multiple comma-separated
+    // origins (FRONTEND_URLS) with FRONTEND_URL as legacy single-value.
+    origin: (
+      process.env.FRONTEND_URLS ??
+      process.env.FRONTEND_URL ??
+      "http://localhost:3000"
+    )
+      .split(",")
+      .map((o) => o.trim())
+      .filter(Boolean),
     credentials: true,
   },
 })

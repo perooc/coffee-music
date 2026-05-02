@@ -7,3 +7,9 @@ coverage
 .env.local
 *.tsbuildinfo
 .DS_Store
+
+# Local data dumps for one-shot imports (keep the real product catalogue
+# out of git).
+apps/backend/data/
+*.xlsx
+*.csv

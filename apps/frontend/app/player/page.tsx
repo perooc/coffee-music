@@ -15,8 +15,8 @@ const D = {
   goldHot: "#F6CF6A",
   cream: "#F5EFE2",
   burgundy: "#8B2635",
-  chalk: "rgba(245,239,226,0.08)",
-  mute: "rgba(245,239,226,0.55)",
+  chalk: "rgba(245,239,.,0.08)",
+  mute: "rgba(245,239,.,0.55)",
 };
 const FONT_DISPLAY = "var(--font-bebas), 'Bebas Neue', Impact, sans-serif";
 const FONT_UI = "var(--font-manrope), system-ui, sans-serif";
@@ -200,14 +200,14 @@ export default function PlayerPage() {
         >
           <defs>
             <linearGradient id="playerFade" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="rgba(245,239,226,0)" />
-              <stop offset="50%" stopColor="rgba(245,239,226,0.15)" />
-              <stop offset="100%" stopColor="rgba(245,239,226,0.04)" />
+              <stop offset="0%" stopColor="rgba(245,239,.,0)" />
+              <stop offset="50%" stopColor="rgba(245,239,.,0.15)" />
+              <stop offset="100%" stopColor="rgba(245,239,.,0.04)" />
             </linearGradient>
           </defs>
           <g stroke="url(#playerFade)" strokeWidth={1.2} fill="none">
             <circle cx="800" cy="450" r="140" />
-            <circle cx="800" cy="450" r="3" fill="rgba(245,239,226,0.35)" />
+            <circle cx="800" cy="450" r="3" fill="rgba(245,239,.,0.35)" />
             <line x1="0" y1="450" x2="1600" y2="450" />
           </g>
         </svg>

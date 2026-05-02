@@ -3,10 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "prisma generate && tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "dev": "nest start --watch",
     "start:dev": "nest start --watch",
+    "// start:prod": "Used by Railway. Runs DB migrations against the live cluster, then boots the compiled app.",
+    "start:prod": "prisma migrate deploy && node dist/main.js",
+    "// db:import-products": "One-shot import from a CSV/XLSX of products. Pass the file path as argv: `npm run db:import-products -- ./products.xlsx`.",
+    "db:import-products": "tsx prisma/import-products.ts",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -35,6 +39,8 @@
     "@types/express": "^5.0.6",
     "@types/node": "^24.7.2",
     "prisma": "^6.7.0",
-    "typescript": "^5.9.3"
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "xlsx": "^0.18.5"
   }
 }

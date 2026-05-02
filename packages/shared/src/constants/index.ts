@@ -7,6 +7,46 @@ export const EXTRA_SONG_CONSUMPTION_THRESHOLD = 20_000;
 /** Cooldown minutes before a table at the limit can add another song */
 export const QUEUE_LIMIT_COOLDOWN_MINUTES = 15;
 
+/**
+ * Per-session "song credits" that govern adding a 6th+ song to the queue.
+ *
+ * Rule:
+ *   - Base 5 slots, always available, regardless of consumption.
+ *   - When the table reaches 5 active songs, adding another one requires
+ *     a "credit". Credits are earned by a SINGLE delivered order whose
+ *     subtotal >= EXTRA_SONG_CONSUMPTION_THRESHOLD ($20k). Two small
+ *     orders that add up to $20k do NOT earn a credit.
+ *   - Each extra song spends one credit. Credits do not stack across
+ *     sessions; opening a new session resets the count to 0.
+ *   - If admin skips an extra song, the credit is returned (the
+ *     spent-count excludes `skipped`).
+ *
+ * `effectiveSongLimit` returns the actual cap right now: 5 + (earned - spent).
+ * `extraCreditsAvailable` is the surplus the table can still spend.
+ */
+export interface SongCredits {
+  /** Delivered orders this session with subtotal >= threshold */
+  earned: number;
+  /** QueueItems flagged is_extra in active or already-played state */
+  spent: number;
+  /** earned − spent, never negative */
+  available: number;
+}
+
+export function effectiveSongLimit(credits: SongCredits): number {
+  return MAX_SONGS_PER_TABLE + credits.earned - credits.spent;
+}
+
+export function makeSongCredits(earned: number, spent: number): SongCredits {
+  const safeEarned = Math.max(0, earned);
+  const safeSpent = Math.max(0, spent);
+  return {
+    earned: safeEarned,
+    spent: safeSpent,
+    available: Math.max(0, safeEarned - safeSpent),
+  };
+}
+
 /** Maximum song duration in seconds (10 minutes) */
 export const MAX_SONG_DURATION_SECONDS = 600;
 

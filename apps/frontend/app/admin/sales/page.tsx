@@ -26,7 +26,7 @@ const C = {
   mute: "#A89883",
 };
 const FONT_DISPLAY = "var(--font-bebas)";
-const FONT_MONO = "var(--font-oswald)";
+const FONT_MONO = "var(--font-manrope)";
 const FONT_UI = "var(--font-manrope)";
 
 const fmt = (n: number) =>

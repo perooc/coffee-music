@@ -27,6 +27,11 @@ enum QueueStatus {
   skipped
 }
 
+enum QueueItemSource {
+  customer
+  house
+}
+
 enum OrderRequestStatus {
   pending
   accepted
@@ -105,6 +110,15 @@ model TableSession {
   last_consumption_at DateTime?
   opened_at           DateTime           @default(now())
   closed_at           DateTime?
+  // Customer-driven flag: "I want the bill". When set, no new
+  // OrderRequest can be created for this session until cleared. The session
+  // stays `open` and the music/fairness signals are unaffected.
+  payment_requested_at DateTime?
+  // Admin-driven flag: payment processed. Stays open after this — the
+  // table can keep consuming; new orders are still blocked until close.
+  // We deliberately keep this as a single timestamp instead of a Payment
+  // table because the read model never needs partial-payment math.
+  paid_at             DateTime?
   metadata            Json?
   created_at          DateTime           @default(now())
   updated_at          DateTime           @updatedAt
@@ -142,12 +156,47 @@ model QueueItem {
   started_playing_at DateTime?
   finished_at        DateTime?
   skipped_at         DateTime?
+  // True when this song was queued as the table's 6th, 7th, ... slot —
+  // i.e. when there were already MAX_SONGS_PER_TABLE active items at the
+  // moment of insertion. Each "extra" song consumes one credit earned by
+  // a delivered order >= EXTRA_SONG_CONSUMPTION_THRESHOLD. If admin skips
+  // an extra song, its is_extra flag stays true but the credit-spent
+  // count excludes `skipped`, so the credit is effectively returned.
+  is_extra           Boolean        @default(false)
+  // Where this queue item came from. `customer` = a real table queued it
+  // through the QR. `house` = the bar-curated playlist auto-fills the
+  // queue when no customer songs are pending. House items always have
+  // table_id = null and priority_score = 0.
+  source             QueueItemSource @default(customer)
   song               Song           @relation(fields: [song_id], references: [id], onDelete: Cascade)
   table              Table?         @relation(fields: [table_id], references: [id], onDelete: Cascade)
   playback_state     PlaybackState?
 
   @@index([status, position])
   @@index([table_id, status])
+  @@index([status, source, position])
+}
+
+/**
+ * Bar-curated fallback playlist. Loaded one item at a time into the live
+ * QueueItem stream when there's no customer music in the queue. Edited
+ * only by admin via /admin/musica-base.
+ */
+model HousePlaylistItem {
+  id             Int       @id @default(autoincrement())
+  youtube_id     String    @unique
+  title          String
+  // Optional — the YouTube validation endpoint may or may not return it.
+  artist         String?
+  duration       Int
+  is_active      Boolean   @default(true)
+  sort_order     Int       @default(0)
+  last_played_at DateTime?
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @updatedAt
+
+  @@index([is_active, sort_order])
+  @@index([is_active, last_played_at])
 }
 
 model Product {

@@ -1,21 +1,15 @@
-import { Hero } from "@/components/landing/Hero";
-import { HowItWorks } from "@/components/landing/HowItWorks";
-import { NowPlayingPreview } from "@/components/landing/NowPlayingPreview";
-import { Ambience } from "@/components/landing/Ambience";
-import { Menu } from "@/components/landing/Menu";
-import { Matches } from "@/components/landing/Matches";
-import { Footer } from "@/components/landing/Footer";
+import { TablePickerLanding } from "@/components/landing/TablePickerLanding";
 
+/**
+ * Temporary landing for the soft-launch period: no physical QR codes have
+ * been printed yet, so customers reach the site directly and choose their
+ * table from a public picker. Two-step gate:
+ *   1. Bar access code (server-side validated against BAR_ACCESS_CODE).
+ *   2. Pick from the list of free tables.
+ *
+ * On success the backend mints a 12h table token and the picker stores it
+ * + redirects to /mesa/:id?t=<token> — exactly the path the QR would use.
+ */
 export default function Home() {
-  return (
-    <main className="relative flex w-full flex-1 flex-col bg-crown-midnight text-crown-cream">
-      <Hero />
-      <HowItWorks />
-      <NowPlayingPreview />
-      <Ambience />
-      <Menu />
-      <Matches />
-      <Footer />
-    </main>
-  );
+  return <TablePickerLanding />;
 }

@@ -45,6 +45,20 @@ export class TokenService {
     return this.sign(claims, "365d");
   }
 
+  /**
+   * Short-lived table token used by the public landing while QR codes
+   * aren't printed yet. Identical claims to `signTable`, only the `exp`
+   * differs — defaults to 12h so a single visit always fits without
+   * forcing the customer to re-pick their table.
+   */
+  signTableShortLived(
+    payload: Omit<TableTokenPayload, "kind">,
+    expiresIn: string = "12h",
+  ): string {
+    const claims: TableTokenPayload = { ...payload, kind: "table" };
+    return this.sign(claims, expiresIn);
+  }
+
   signSession(payload: Omit<SessionTokenPayload, "kind">): string {
     const claims: SessionTokenPayload = { ...payload, kind: "session" };
     return this.sign(claims, process.env.JWT_SESSION_EXPIRES_IN ?? "6h");

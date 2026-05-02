@@ -107,4 +107,42 @@ export class TableSessionsController {
     }
     return this.sessions.serialize(session);
   }
+
+  // ─── Payment flow ─────────────────────────────────────────────────────
+
+  /**
+   * Customer asks for the bill. SessionAccessGuard ensures the path
+   * sessionId matches the token's session_id; admin bypasses.
+   */
+  @Post("table-sessions/:id/request-payment")
+  @UseGuards(JwtGuard, SessionAccessGuard)
+  @AuthKinds("session")
+  async requestPayment(@Param("id", ParseIntPipe) id: number) {
+    const session = await this.sessions.requestPayment(id);
+    return this.sessions.serialize(session);
+  }
+
+  /**
+   * Customer cancels their own pending payment request. Admin can also
+   * call this in case of fat-finger but the typical flow is customer.
+   */
+  @Post("table-sessions/:id/cancel-payment-request")
+  @UseGuards(JwtGuard, SessionAccessGuard)
+  @AuthKinds("session", "admin")
+  async cancelPaymentRequest(@Param("id", ParseIntPipe) id: number) {
+    const session = await this.sessions.cancelPaymentRequest(id);
+    return this.sessions.serialize(session);
+  }
+
+  /**
+   * Admin records that the bill was paid AND closes the session in one
+   * step. The customer must scan the QR again to start a new session.
+   */
+  @Post("table-sessions/:id/mark-paid")
+  @UseGuards(JwtGuard)
+  @AuthKinds("admin")
+  async markPaid(@Param("id", ParseIntPipe) id: number) {
+    const session = await this.sessions.markPaid(id);
+    return this.sessions.serialize(session);
+  }
 }

@@ -43,7 +43,12 @@ export class OrderRequestsService {
   async create(dto: CreateOrderRequestDto): Promise<OrderRequestFull> {
     const session = await this.prisma.tableSession.findUnique({
       where: { id: dto.table_session_id },
-      select: { id: true, table_id: true, status: true },
+      select: {
+        id: true,
+        table_id: true,
+        status: true,
+        payment_requested_at: true,
+      },
     });
     if (!session) {
       throw new NotFoundException({
@@ -55,6 +60,15 @@ export class OrderRequestsService {
       throw new BadRequestException({
         message: "Session is closed",
         code: "TABLE_SESSION_CLOSED",
+      });
+    }
+    // Once the customer has asked for the bill, no new orders are
+    // accepted from the customer side. (Paid sessions are already closed
+    // and caught by the status check above.)
+    if (session.payment_requested_at) {
+      throw new BadRequestException({
+        message: "Session has a pending payment request",
+        code: "SESSION_PAYMENT_REQUESTED",
       });
     }
 
@@ -186,7 +200,14 @@ export class OrderRequestsService {
     const request = await this.prisma.orderRequest.findUnique({
       where: { id: requestId },
       include: {
-        table_session: { select: { id: true, table_id: true, status: true } },
+        table_session: {
+          select: {
+            id: true,
+            table_id: true,
+            status: true,
+            payment_requested_at: true,
+          },
+        },
       },
     });
     if (!request) {
@@ -202,6 +223,14 @@ export class OrderRequestsService {
       throw new BadRequestException({
         message: "Session is closed",
         code: "TABLE_SESSION_CLOSED",
+      });
+    }
+    // Editing is also blocked once payment has been requested. Once paid,
+    // the session is closed and the status check above already covers it.
+    if (request.table_session.payment_requested_at) {
+      throw new BadRequestException({
+        message: "Session has a pending payment request",
+        code: "SESSION_PAYMENT_REQUESTED",
       });
     }
 

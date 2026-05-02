@@ -18,7 +18,7 @@ const C = {
     "0 1px 0 rgba(43,29,20,0.04), 0 12px 32px -18px rgba(107,78,46,0.28)",
 };
 const FONT_DISPLAY = "var(--font-bebas)";
-const FONT_MONO = "var(--font-oswald)";
+const FONT_MONO = "var(--font-manrope)";
 const FONT_UI = "var(--font-manrope)";
 
 export default function AdminLoginPage() {

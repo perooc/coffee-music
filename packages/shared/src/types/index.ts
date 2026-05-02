@@ -42,6 +42,27 @@ export interface Table {
   queue_items?: QueueItem[];
   orders?: Order[];
   _count?: TableCountSummary;
+  /**
+   * Slim view of the table's current session. Lets the admin dashboard
+   * render payment badges without round-tripping per row. Null when the
+   * table has no open session.
+   *
+   * `song_credits` is the per-session ledger that decides whether the
+   * table can add a 6th+ song to the queue. See SongCredits in shared
+   * constants for the math.
+   */
+  current_session?: {
+    id: number;
+    status: TableSessionStatus;
+    payment_requested_at: string | null;
+    paid_at: string | null;
+    opened_at: string;
+    song_credits: {
+      earned: number;
+      spent: number;
+      available: number;
+    };
+  } | null;
 }
 
 export interface TableSession {
@@ -52,6 +73,18 @@ export interface TableSession {
   last_consumption_at: string | null;
   opened_at: string;
   closed_at: string | null;
+  /**
+   * Set when the customer presses "Pedir cuenta". While not null, the
+   * session blocks new OrderRequest creation. Cleared by either the
+   * customer (cancel) or by the admin closing the session.
+   */
+  payment_requested_at: string | null;
+  /**
+   * Set when the admin marks the bill as paid. The session can still stay
+   * open — the customer can keep consuming, but new orders remain blocked
+   * until the admin closes the session.
+   */
+  paid_at: string | null;
   metadata: unknown | null;
   created_at: string;
   updated_at: string;

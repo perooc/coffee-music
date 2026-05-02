@@ -1,53 +1,183 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
-  adminProductsApi,
-  inventoryMovementsApi,
-} from "@/lib/api/services";
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { adminProductsApi } from "@/lib/api/services";
 import { getErrorMessage } from "@/lib/errors";
-import type {
-  InventoryMovement,
-  InventoryMovementType,
-  Product,
-} from "@coffee-bar/shared";
-
-// ─── Warm palette (matches /admin) ────────────────────────────────────────────
-const C = {
-  cream: "#FDF8EC",
-  parchment: "#F8F1E4",
-  paper: "#FFFDF8",
-  sand: "#F1E6D2",
-  sandDark: "#E6D8BF",
-  gold: "#B8894A",
-  goldSoft: "#E8D4A8",
-  burgundy: "#8B2635",
-  burgundySoft: "#E8CDD2",
-  olive: "#6B7E4A",
-  oliveSoft: "#E5EAD3",
-  cacao: "#6B4E2E",
-  ink: "#2B1D14",
-  mute: "#A89883",
-};
-const FONT_DISPLAY = "var(--font-bebas)";
-const FONT_MONO = "var(--font-oswald)";
-const FONT_UI = "var(--font-manrope)";
-
-const fmt = (n: number) =>
-  new Intl.NumberFormat("es-CO", {
-    style: "currency",
-    currency: "COP",
-    maximumFractionDigits: 0,
-  }).format(n);
-
-type Tab = "catalog" | "movements";
+import type { Product } from "@coffee-bar/shared";
+import {
+  C,
+  FONT_DISPLAY,
+  FONT_MONO,
+  FONT_UI,
+  fmt,
+  btnPrimary,
+  btnGhost,
+  BUTTON_STYLES,
+  SHARED_KEYFRAMES,
+  DUR_BASE,
+} from "@/lib/theme";
+import { ProductDetailPanel } from "@/components/admin/ProductDetailPanel";
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 export default function AdminProductsPage() {
-  const [tab, setTab] = useState<Tab>("catalog");
+  // El state del catálogo vive en el page (no en CatalogTab) para que el
+  // header (búsqueda, CTA "Nuevo") pueda interactuar directamente con el
+  // catálogo sin tener que pasar callbacks a través de refs. Esto también
+  // prepara el terreno para el panel derecho contextual (Paso 5), que
+  // necesitará leer/escribir esta misma data.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<
+    "all" | "active" | "low_stock" | "inactive"
+  >("all");
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  // Editor solo se usa para "crear" — editar pasa al panel derecho inline.
+  // Mantenemos el state como objeto por consistencia con el modal existente.
+  const [editor, setEditor] = useState<{ mode: "create" } | null>(null);
+
+  // Cuando el operador clickea "+ Stock" en una fila, queremos: (1)
+  // seleccionar el producto, (2) abrir el panel directamente en modo
+  // stock. Trackeamos el "intent" del último cambio de selección — si
+  // vino de "+ Stock" el panel arranca en modo stock; si vino de un
+  // click normal en la fila, arranca en modo view. El nonce dentro del
+  // intent fuerza el remount del panel aunque el operador clickee dos
+  // veces "+ Stock" en la misma fila.
+  const [panelIntent, setPanelIntent] = useState<{
+    mode: "view" | "stock";
+    nonce: number;
+  }>({ mode: "view", nonce: 0 });
+
+  // Selección persistida en query param `?id=X` para que el operador pueda
+  // refrescar / compartir un link directo a un producto concreto. El Paso 5
+  // usará `selectedId` para alimentar el panel derecho contextual; por
+  // ahora solo aplica el highlight visual de la fila.
+  const selectedIdRaw = searchParams?.get("id");
+  const selectedId = selectedIdRaw ? Number(selectedIdRaw) : null;
+  const setSelectedId = useCallback(
+    (id: number | null) => {
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
+      if (id == null) params.delete("id");
+      else params.set("id", String(id));
+      const qs = params.toString();
+      router.replace(qs ? `?${qs}` : "?", { scroll: false });
+    },
+    [router, searchParams],
+  );
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await adminProductsApi.getAll();
+      setProducts(list);
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  // Derivado de selectedId — siempre miramos al `products` actual para
+  // que después de un refresh el panel muestre la versión nueva del
+  // producto editado.
+  const selectedProduct = useMemo(
+    () =>
+      selectedId == null
+        ? null
+        : products.find((p) => p.id === selectedId) ?? null,
+    [products, selectedId],
+  );
+
+  // Aplicar filtros en el page (no en Catalog) para poder usar la misma
+  // lista en el keyboard handler de abajo. Si el cálculo se quedaba en
+  // Catalog, tendríamos que duplicarlo aquí o exponerlo via ref — peor.
+  const filtered = useMemo(() => {
+    let list = products;
+    if (filter === "active") list = list.filter((p) => p.is_active);
+    else if (filter === "inactive") list = list.filter((p) => !p.is_active);
+    else if (filter === "low_stock")
+      list = list.filter((p) => p.is_low_stock || p.is_out_of_stock);
+    if (categoryFilter) {
+      list = list.filter((p) => p.category === categoryFilter);
+    }
+    const q = query.trim().toLowerCase();
+    if (q.length > 0) {
+      list = list.filter(
+        (p) =>
+          p.name.toLowerCase().includes(q) ||
+          (p.category ?? "").toLowerCase().includes(q),
+      );
+    }
+    return list;
+  }, [products, filter, categoryFilter, query]);
+
+  // Keyboard navigation: ↑/↓ mueven la selección dentro del catálogo
+  // filtrado, Escape cierra el panel. Ignoramos las teclas si el foco
+  // está en un input/textarea/select/contenteditable (típicamente la
+  // barra de búsqueda) — el operador escribe normalmente sin que el
+  // page secuestre los flechazos del cursor.
+  useEffect(() => {
+    function isFormElement(target: EventTarget | null): boolean {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (target.isContentEditable) return true;
+      return false;
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (isFormElement(e.target)) return;
+      if (e.key === "Escape") {
+        if (selectedId != null) {
+          e.preventDefault();
+          setSelectedId(null);
+        }
+        return;
+      }
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      if (filtered.length === 0) return;
+      e.preventDefault();
+      const currentIndex = selectedId
+        ? filtered.findIndex((p) => p.id === selectedId)
+        : -1;
+      const nextIndex =
+        e.key === "ArrowDown"
+          ? (currentIndex < 0 ? 0 : Math.min(filtered.length - 1, currentIndex + 1))
+          : (currentIndex < 0 ? filtered.length - 1 : Math.max(0, currentIndex - 1));
+      const next = filtered[nextIndex];
+      if (next) {
+        setSelectedId(next.id);
+        setPanelIntent((prev) => ({ mode: "view", nonce: prev.nonce + 1 }));
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [filtered, selectedId, setSelectedId]);
 
   return (
+    <>
+    <style>{`
+      ${SHARED_KEYFRAMES}
+      ${BUTTON_STYLES}
+    `}</style>
     <main
       style={{
         minHeight: "100dvh",
@@ -67,177 +197,224 @@ export default function AdminProductsPage() {
           gap: 12,
         }}
       >
-        <div>
-          <span
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <Link
+            href="/admin"
+            className="crown-btn crown-btn-ghost"
+            aria-label="Volver al tablero"
             style={{
-              fontFamily: FONT_MONO,
-              fontSize: 9,
-              letterSpacing: 3,
-              color: C.mute,
-              textTransform: "uppercase",
-              fontWeight: 600,
+              ...btnGhost({ fg: C.cacao, border: C.sand }),
+              textDecoration: "none",
+              padding: "6px 12px",
+              fontSize: 11,
             }}
           >
-            — Crown Bar 4.90
-          </span>
-          <h1
-            style={{
-              fontFamily: FONT_DISPLAY,
-              fontSize: 26,
-              color: C.ink,
-              letterSpacing: 4,
-              margin: "2px 0 0",
-              textTransform: "uppercase",
-            }}
-          >
-            Productos
-          </h1>
+            ←
+          </Link>
+          <div>
+            <span
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 9,
+                letterSpacing: 3,
+                color: C.mute,
+                textTransform: "uppercase",
+                fontWeight: 600,
+              }}
+            >
+              — Crown Bar 4.90
+            </span>
+            <h1
+              style={{
+                fontFamily: FONT_DISPLAY,
+                fontSize: 26,
+                color: C.ink,
+                letterSpacing: 4,
+                margin: "2px 0 0",
+                textTransform: "uppercase",
+              }}
+            >
+              Productos
+            </h1>
+          </div>
         </div>
-        <Link
-          href="/admin"
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 11,
-            letterSpacing: 2,
-            color: C.cacao,
-            textDecoration: "none",
-            border: `1px solid ${C.sand}`,
-            padding: "8px 14px",
-            borderRadius: 999,
-            background: C.paper,
-            textTransform: "uppercase",
-            fontWeight: 700,
-          }}
-        >
-          ← Tablero
-        </Link>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flex: 1, justifyContent: "flex-end", minWidth: 0 }}>
+          <SearchInput value={query} onChange={setQuery} />
+          <button
+            type="button"
+            className="crown-btn crown-btn-primary"
+            onClick={() => setEditor({ mode: "create" })}
+            style={btnPrimary({ bg: C.olive, fg: C.paper })}
+          >
+            + Nuevo producto
+          </button>
+        </div>
       </header>
 
-      <nav
-        role="tablist"
-        aria-label="Pestañas de productos"
-        style={{
-          display: "flex",
-          gap: 8,
-          marginBottom: 18,
-          borderBottom: `1px solid ${C.sand}`,
-          paddingBottom: 0,
-        }}
-      >
-        <TabButton active={tab === "catalog"} onClick={() => setTab("catalog")}>
-          Catálogo
-        </TabButton>
-        <TabButton
-          active={tab === "movements"}
-          onClick={() => setTab("movements")}
-        >
-          Movimientos
-        </TabButton>
-      </nav>
-
-      {tab === "catalog" ? <CatalogTab /> : <MovementsTab />}
-    </main>
-  );
-}
-
-function TabButton({
-  active,
-  children,
-  onClick,
-}: {
-  active: boolean;
-  children: React.ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      style={{
-        padding: "9px 16px",
-        border: "none",
-        borderBottom: `3px solid ${active ? C.ink : "transparent"}`,
-        background: "transparent",
-        color: active ? C.ink : C.mute,
-        fontFamily: FONT_DISPLAY,
-        fontSize: 14,
-        letterSpacing: 3,
-        textTransform: "uppercase",
-        cursor: "pointer",
-        marginBottom: -1,
-        fontWeight: 600,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-// ─── Catalog tab ─────────────────────────────────────────────────────────────
-function CatalogTab() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<
-    "all" | "active" | "low_stock" | "inactive"
-  >("all");
-
-  const [editor, setEditor] = useState<
-    | { mode: "create" }
-    | { mode: "edit"; product: Product }
-    | null
-  >(null);
-  const [stockEditor, setStockEditor] = useState<Product | null>(null);
-  const [historyOpen, setHistoryOpen] = useState<Product | null>(null);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const list = await adminProductsApi.getAll();
-      setProducts(list);
-    } catch (e) {
-      setError(getErrorMessage(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  const filtered = useMemo(() => {
-    if (filter === "active") return products.filter((p) => p.is_active);
-    if (filter === "inactive") return products.filter((p) => !p.is_active);
-    if (filter === "low_stock")
-      return products.filter((p) => p.is_low_stock || p.is_out_of_stock);
-    return products;
-  }, [products, filter]);
-
-  return (
-    <section>
+      {/* Layout 3 columnas:
+            sidebar filtros (220px) | catálogo (1fr) | detalle (360px)
+          Todas siempre visibles. El catálogo se ajusta al espacio sobrante;
+          el detalle solo muestra contenido cuando hay producto seleccionado.
+          En pantallas chicas el grid se ajusta con minmax para evitar
+          overflow horizontal. */}
       <div
         style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 14,
-          flexWrap: "wrap",
-          gap: 10,
+          display: "grid",
+          gridTemplateColumns: "220px minmax(0, 1fr) 360px",
+          gap: 16,
+          alignItems: "start",
         }}
       >
-        <FilterChips value={filter} onChange={setFilter} />
-        <button
-          type="button"
-          onClick={() => setEditor({ mode: "create" })}
-          style={primaryBtnStyle}
-        >
-          + Nuevo producto
-        </button>
+        <CatalogFilters
+          products={products}
+          filter={filter}
+          onFilterChange={setFilter}
+          categoryFilter={categoryFilter}
+          onCategoryChange={setCategoryFilter}
+        />
+        <Catalog
+          filtered={filtered}
+          loading={loading}
+          error={error}
+          query={query}
+          selectedId={selectedId}
+          onSelect={(id) => {
+            setSelectedId(id);
+            setPanelIntent((p) => ({ mode: "view", nonce: p.nonce + 1 }));
+          }}
+          onStock={(p) => {
+            setSelectedId(p.id);
+            setPanelIntent((prev) => ({
+              mode: "stock",
+              nonce: prev.nonce + 1,
+            }));
+          }}
+        />
+        {/* `key` fuerza remount del panel cada vez que cambia el intent
+            del operador (selección normal vs "+ Stock"), reseteando el
+            `mode` interno sin setState-in-effect. */}
+        <ProductDetailPanel
+          key={
+            selectedProduct
+              ? `${selectedProduct.id}-${panelIntent.nonce}`
+              : "empty"
+          }
+          product={selectedProduct}
+          initialMode={panelIntent.mode}
+          onSaved={() => void refresh()}
+          onClose={() => setSelectedId(null)}
+        />
       </div>
 
+      {editor && (
+        <ProductFormModal
+          mode={editor.mode}
+          product={null}
+          onClose={() => setEditor(null)}
+          onSaved={async () => {
+            setEditor(null);
+            await refresh();
+          }}
+        />
+      )}
+    </main>
+    </>
+  );
+}
+
+/**
+ * Input de búsqueda del header. Búsqueda client-side por nombre y
+ * categoría — para 100 productos `includes()` corre instantáneo. Si en
+ * el futuro pasamos a 500+, swap a Fuse.js sin tocar la API del componente.
+ */
+function SearchInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "relative",
+        flex: "1 1 220px",
+        maxWidth: 360,
+        minWidth: 180,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          left: 12,
+          top: "50%",
+          transform: "translateY(-50%)",
+          color: C.mute,
+          fontSize: 13,
+          pointerEvents: "none",
+        }}
+      >
+        ⌕
+      </span>
+      <input
+        type="search"
+        placeholder="Buscar por nombre o categoría..."
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: "100%",
+          padding: "8px 12px 8px 32px",
+          border: `1px solid ${C.sand}`,
+          borderRadius: 999,
+          background: C.paper,
+          color: C.ink,
+          fontFamily: FONT_UI,
+          fontSize: 13,
+          outline: "none",
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── Catalog (presentational) ────────────────────────────────────────────────
+//
+// Recibe data + callbacks por props. La búsqueda + filtros se aplican aquí
+// (client-side) sobre el array de products que ya vino del page. Esto evita
+// re-fetches por cada keystroke y es trivial para 100 productos.
+//
+// El header sticky y las filas comparten esta grid template para que las
+// columnas queden alineadas. La columna "Acción" es chica (90px) porque
+// solo lleva un botón rápido `+ Stock` — el resto de acciones (editar,
+// historial, activar/desactivar) viven en el panel derecho contextual
+// que se abre al seleccionar la fila.
+const GRID_COLS = "minmax(180px,2fr) 1fr 1fr 1fr 90px";
+function Catalog({
+  filtered,
+  loading,
+  error,
+  query,
+  selectedId,
+  onSelect,
+  onStock,
+}: {
+  filtered: Product[];
+  loading: boolean;
+  error: string | null;
+  query: string;
+  selectedId: number | null;
+  onSelect: (id: number | null) => void;
+  onStock: (p: Product) => void;
+}) {
+  // El header sticky vive en un elemento separado (grid header) y las
+  // filas en otro (lista virtualizable a futuro). El sticky funciona solo
+  // si el contenedor padre permite scroll — en este caso, el body de la
+  // página entera. Si en algún punto encerramos esto en un overflow:auto,
+  // el sticky seguirá pegándose al top del scroller correcto.
+  return (
+    <section>
       {error && <ErrorBanner text={error} />}
 
       <div
@@ -251,9 +428,9 @@ function CatalogTab() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(180px,2fr) 1fr 1fr 1fr 200px",
+            gridTemplateColumns: GRID_COLS,
             padding: "12px 18px",
-            background: C.parchment,
+            background: `linear-gradient(180deg, ${C.paper} 0%, ${C.parchment} 100%)`,
             borderBottom: `1px solid ${C.sand}`,
             fontFamily: FONT_MONO,
             fontSize: 9,
@@ -261,28 +438,25 @@ function CatalogTab() {
             color: C.mute,
             textTransform: "uppercase",
             fontWeight: 700,
+            position: "sticky",
+            top: 0,
+            zIndex: 2,
+            backdropFilter: "blur(6px)",
+            WebkitBackdropFilter: "blur(6px)",
           }}
         >
           <div>Producto</div>
           <div>Categoría</div>
           <div>Precio</div>
           <div>Stock</div>
-          <div style={{ textAlign: "right" }}>Acciones</div>
+          <div style={{ textAlign: "right" }}>Acción</div>
         </div>
 
         {loading && filtered.length === 0 && (
-          <div
-            style={{
-              padding: 32,
-              textAlign: "center",
-              fontFamily: FONT_MONO,
-              fontSize: 11,
-              color: C.mute,
-              letterSpacing: 2,
-              textTransform: "uppercase",
-            }}
-          >
-            Cargando...
+          <div aria-label="Cargando productos">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <SkeletonRow key={i} index={i} />
+            ))}
           </div>
         )}
 
@@ -298,131 +472,435 @@ function CatalogTab() {
               textTransform: "uppercase",
             }}
           >
-            Sin resultados
+            {query.trim().length > 0 ? "Sin coincidencias" : "Sin resultados"}
           </div>
         )}
 
-        {filtered.map((p) => (
+        <AnimatePresence initial={false}>
+        {filtered.map((p, i) => (
           <ProductRow
             key={p.id}
             product={p}
-            onEdit={() => setEditor({ mode: "edit", product: p })}
-            onStock={() => setStockEditor(p)}
-            onHistory={() => setHistoryOpen(p)}
-            onToggleActive={async () => {
-              try {
-                if (p.is_active) await adminProductsApi.deactivate(p.id);
-                else await adminProductsApi.activate(p.id);
-                await refresh();
-              } catch (e) {
-                setError(getErrorMessage(e));
-              }
-            }}
+            index={i}
+            selected={p.id === selectedId}
+            onSelect={() => onSelect(p.id === selectedId ? null : p.id)}
+            onStock={() => onStock(p)}
           />
         ))}
+        </AnimatePresence>
       </div>
-
-      {editor && (
-        <ProductFormModal
-          mode={editor.mode}
-          product={editor.mode === "edit" ? editor.product : null}
-          onClose={() => setEditor(null)}
-          onSaved={async () => {
-            setEditor(null);
-            await refresh();
-          }}
-        />
-      )}
-
-      {stockEditor && (
-        <StockMovementModal
-          product={stockEditor}
-          onClose={() => setStockEditor(null)}
-          onSaved={async () => {
-            setStockEditor(null);
-            await refresh();
-          }}
-        />
-      )}
-
-      {historyOpen && (
-        <ProductHistoryDrawer
-          product={historyOpen}
-          onClose={() => setHistoryOpen(null)}
-        />
-      )}
     </section>
   );
 }
 
-function FilterChips({
-  value,
-  onChange,
+// ─── Catalog filters (sidebar izquierdo) ─────────────────────────────────────
+//
+// Sidebar 220px con dos secciones:
+//   1. Estado: lista vertical (Todos / Activos / Bajo stock / Inactivos)
+//      con contador por bucket. El item activo lleva fondo ink + texto
+//      paper para contraste claro.
+//   2. Categorías: derivadas del catálogo. Click selecciona/deselecciona
+//      la categoría como filtro adicional. El "deselect" (click en la
+//      misma) regresa a "todas las categorías".
+//
+// Los contadores reflejan el catálogo COMPLETO (no el filtrado), así el
+// operador siempre ve totales reales y no cifras que cambien al
+// seleccionar una categoría.
+type StatusKey = "all" | "active" | "low_stock" | "inactive";
+
+function CatalogFilters({
+  products,
+  filter,
+  onFilterChange,
+  categoryFilter,
+  onCategoryChange,
 }: {
-  value: "all" | "active" | "low_stock" | "inactive";
-  onChange: (v: "all" | "active" | "low_stock" | "inactive") => void;
+  products: Product[];
+  filter: StatusKey;
+  onFilterChange: (v: StatusKey) => void;
+  categoryFilter: string | null;
+  onCategoryChange: (v: string | null) => void;
 }) {
-  const items: { key: typeof value; label: string }[] = [
-    { key: "all", label: "Todos" },
-    { key: "active", label: "Activos" },
-    { key: "low_stock", label: "Bajo stock" },
-    { key: "inactive", label: "Inactivos" },
+  const counts = useMemo(() => {
+    const all = products.length;
+    const active = products.filter((p) => p.is_active).length;
+    const low = products.filter(
+      (p) => p.is_low_stock || p.is_out_of_stock,
+    ).length;
+    const inactive = products.filter((p) => !p.is_active).length;
+    return { all, active, low_stock: low, inactive };
+  }, [products]);
+
+  const categories = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const p of products) {
+      const cat = (p.category ?? "").trim();
+      if (!cat) continue;
+      map.set(cat, (map.get(cat) ?? 0) + 1);
+    }
+    return Array.from(map.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], "es"))
+      .map(([name, count]) => ({ name, count }));
+  }, [products]);
+
+  const statusItems: { key: StatusKey; label: string; tone: "neutral" | "alert" }[] = [
+    { key: "all", label: "Todos", tone: "neutral" },
+    { key: "active", label: "Activos", tone: "neutral" },
+    { key: "low_stock", label: "Bajo stock", tone: "alert" },
+    { key: "inactive", label: "Inactivos", tone: "neutral" },
   ];
+
   return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-      {items.map((i) => {
-        const active = value === i.key;
-        return (
-          <button
-            key={i.key}
-            type="button"
-            onClick={() => onChange(i.key)}
+    <aside
+      style={{
+        position: "sticky",
+        top: 16,
+        background: C.paper,
+        border: `1px solid ${C.sand}`,
+        borderRadius: 14,
+        padding: "14px 12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 18,
+      }}
+    >
+      <div>
+        <SidebarHeading>Estado</SidebarHeading>
+        <ul
+          style={{
+            listStyle: "none",
+            padding: 0,
+            margin: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          {statusItems.map((item) => {
+            const isActive = filter === item.key;
+            const count = counts[item.key];
+            const isAlert = item.tone === "alert" && count > 0;
+            return (
+              <li key={item.key}>
+                <button
+                  type="button"
+                  onClick={() => onFilterChange(item.key)}
+                  className="crown-btn"
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "8px 12px",
+                    border: "none",
+                    borderRadius: 10,
+                    background: isActive ? C.ink : "transparent",
+                    color: isActive ? C.paper : isAlert ? C.terracotta : C.cacao,
+                    fontFamily: FONT_UI,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    letterSpacing: 0.3,
+                    cursor: "pointer",
+                    textAlign: "left",
+                    textTransform: "uppercase",
+                    transition:
+                      "background 160ms cubic-bezier(0.16,1,0.3,1), color 160ms cubic-bezier(0.16,1,0.3,1)",
+                  }}
+                >
+                  <span>{item.label}</span>
+                  <CountChip
+                    value={count}
+                    active={isActive}
+                    alert={isAlert}
+                  />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {categories.length > 0 && (
+        <div>
+          <SidebarHeading>
+            Categorías
+            {categoryFilter && (
+              <button
+                type="button"
+                onClick={() => onCategoryChange(null)}
+                style={{
+                  marginLeft: 8,
+                  background: "transparent",
+                  border: "none",
+                  color: C.terracotta,
+                  fontFamily: FONT_MONO,
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: 1,
+                  cursor: "pointer",
+                  textTransform: "uppercase",
+                  padding: 0,
+                }}
+              >
+                Limpiar
+              </button>
+            )}
+          </SidebarHeading>
+          <ul
             style={{
-              padding: "6px 12px",
-              borderRadius: 999,
-              border: `1px solid ${active ? C.ink : C.sand}`,
-              background: active ? C.ink : C.paper,
-              color: active ? C.paper : C.cacao,
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              letterSpacing: 2,
-              cursor: "pointer",
-              textTransform: "uppercase",
-              fontWeight: 700,
+              listStyle: "none",
+              padding: 0,
+              margin: 0,
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
+              maxHeight: 360,
+              overflowY: "auto",
             }}
           >
-            {i.label}
-          </button>
-        );
-      })}
+            {categories.map((c) => {
+              const isActive = categoryFilter === c.name;
+              return (
+                <li key={c.name}>
+                  <button
+                    type="button"
+                    onClick={() => onCategoryChange(isActive ? null : c.name)}
+                    className="crown-btn"
+                    style={{
+                      width: "100%",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      padding: "6px 10px",
+                      border: "none",
+                      borderRadius: 8,
+                      background: isActive
+                        ? `color-mix(in srgb, ${C.goldSoft} 50%, ${C.paper})`
+                        : "transparent",
+                      color: isActive ? C.cacao : C.ink,
+                      fontFamily: FONT_UI,
+                      fontSize: 12,
+                      fontWeight: isActive ? 700 : 500,
+                      cursor: "pointer",
+                      textAlign: "left",
+                      transition:
+                        "background 160ms cubic-bezier(0.16,1,0.3,1)",
+                    }}
+                  >
+                    <span
+                      style={{
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        flex: 1,
+                        minWidth: 0,
+                      }}
+                    >
+                      {c.name}
+                    </span>
+                    <span
+                      style={{
+                        fontFamily: FONT_MONO,
+                        fontSize: 10,
+                        color: C.mute,
+                        fontWeight: 700,
+                        marginLeft: 6,
+                      }}
+                    >
+                      {c.count}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </aside>
+  );
+}
+
+function SidebarHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        fontFamily: FONT_MONO,
+        fontSize: 9,
+        letterSpacing: 3,
+        color: C.mute,
+        fontWeight: 700,
+        textTransform: "uppercase",
+        marginBottom: 8,
+        paddingLeft: 4,
+        display: "flex",
+        alignItems: "baseline",
+      }}
+    >
+      {children}
     </div>
+  );
+}
+
+function CountChip({
+  value,
+  active,
+  alert,
+}: {
+  value: number;
+  active: boolean;
+  alert: boolean;
+}) {
+  let bg: string;
+  let fg: string;
+  if (active) {
+    bg = C.paper;
+    fg = C.ink;
+  } else if (alert) {
+    bg = C.terracottaSoft;
+    fg = C.terracotta;
+  } else {
+    bg = C.parchment;
+    fg = C.mute;
+  }
+  return (
+    <span
+      style={{
+        minWidth: 22,
+        padding: "1px 8px",
+        borderRadius: 999,
+        background: bg,
+        color: fg,
+        fontFamily: FONT_MONO,
+        fontSize: 10,
+        fontWeight: 800,
+        letterSpacing: 0.5,
+        textAlign: "center",
+        lineHeight: "16px",
+      }}
+    >
+      {value}
+    </span>
   );
 }
 
 function ProductRow({
   product,
-  onEdit,
+  index,
+  selected,
+  onSelect,
   onStock,
-  onHistory,
-  onToggleActive,
 }: {
   product: Product;
-  onEdit: () => void;
+  index: number;
+  selected: boolean;
+  onSelect: () => void;
   onStock: () => void;
-  onHistory: () => void;
-  onToggleActive: () => void;
 }) {
+  const needsAttention = product.is_low_stock || product.is_out_of_stock;
+  // Borde lateral: gold si está seleccionada, terracotta si pide atención
+  // (low/out of stock), transparente si no aplica nada. Selección gana
+  // sobre alerta — el feedback de "estoy en este producto" es lo más
+  // crítico cuando el operador navega con teclado.
+  const accentBorder = selected
+    ? C.gold
+    : needsAttention
+      ? C.terracotta
+      : "transparent";
+
+  // Cuando la selección cambia (ej. via keyboard ↑/↓), aseguramos que la
+  // fila quede visible. `block: "nearest"` evita scrolls bruscos cuando
+  // la fila ya está en viewport — solo desplaza si está fuera.
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (selected && ref.current) {
+      ref.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [selected]);
+
   return (
-    <div
+    <motion.div
+      ref={ref}
+      layout
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0 }}
+      transition={{
+        duration: DUR_BASE / 1000,
+        ease: [0.16, 1, 0.3, 1],
+        delay: Math.min(index * 0.015, 0.18),
+      }}
+      role="button"
+      tabIndex={0}
+      onClick={onSelect}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
       style={{
+        position: "relative",
         display: "grid",
-        gridTemplateColumns: "minmax(180px,2fr) 1fr 1fr 1fr 200px",
-        padding: "14px 18px",
+        gridTemplateColumns: GRID_COLS,
+        padding: "14px 18px 14px 21px",
         borderBottom: `1px solid ${C.sand}`,
+        borderLeft: `3px solid ${accentBorder}`,
         alignItems: "center",
         opacity: product.is_active ? 1 : 0.55,
+        cursor: "pointer",
+        background: selected
+          ? `color-mix(in srgb, ${C.goldSoft} 35%, ${C.paper})`
+          : C.paper,
+        transition:
+          "background 160ms cubic-bezier(0.16,1,0.3,1), border-color 160ms cubic-bezier(0.16,1,0.3,1)",
+        outline: "none",
       }}
+      onMouseEnter={(e) => {
+        if (!selected) {
+          e.currentTarget.style.background = C.parchment;
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!selected) {
+          e.currentTarget.style.background = C.paper;
+        }
+      }}
+      onFocus={(e) => {
+        e.currentTarget.style.boxShadow = `inset 0 0 0 2px ${C.gold}`;
+      }}
+      onBlur={(e) => {
+        e.currentTarget.style.boxShadow = "none";
+      }}
+      aria-pressed={selected}
     >
+      {/* Chevron indicator de selección. Aparece desde la izquierda con
+          slide+fade cuando el row está activo. Es decorativo (aria-hidden)
+          — el aria-pressed ya comunica el estado para screen readers. */}
+      <AnimatePresence>
+        {selected && (
+          <motion.span
+            aria-hidden
+            initial={{ opacity: 0, x: -6 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -6 }}
+            transition={{ duration: DUR_BASE / 1000, ease: [0.16, 1, 0.3, 1] }}
+            style={{
+              position: "absolute",
+              left: 6,
+              top: "50%",
+              transform: "translateY(-50%)",
+              color: C.gold,
+              fontFamily: FONT_DISPLAY,
+              fontSize: 14,
+              lineHeight: 1,
+              pointerEvents: "none",
+            }}
+          >
+            ▸
+          </motion.span>
+        )}
+      </AnimatePresence>
+
       <div>
         <div
           style={{
@@ -444,7 +922,7 @@ function ProductRow({
         >
           {!product.is_active && <Badge color={C.mute} bg={C.sand} text="Inactivo" />}
           {product.is_out_of_stock && (
-            <Badge color={C.burgundy} bg={C.burgundySoft} text="Agotado" />
+            <Badge color={C.terracotta} bg={C.terracottaSoft} text="Agotado" />
           )}
           {product.is_low_stock && (
             <Badge color={C.cacao} bg={C.goldSoft} text="Bajo stock" />
@@ -471,47 +949,74 @@ function ProductRow({
           </span>
         )}
       </div>
-      <div
-        style={{ display: "flex", gap: 6, justifyContent: "flex-end", flexWrap: "wrap" }}
-      >
-        <RowButton onClick={onStock}>Stock</RowButton>
-        <RowButton onClick={onEdit}>Editar</RowButton>
-        <RowButton onClick={onHistory}>Historial</RowButton>
-        <RowButton onClick={onToggleActive}>
-          {product.is_active ? "Desactivar" : "Activar"}
-        </RowButton>
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <button
+          type="button"
+          className="crown-btn crown-btn-ghost"
+          onClick={(e) => {
+            // Stop propagation: si no, el click sube al row y dispara
+            // selección/deselección — no queremos eso al pulsar +Stock.
+            e.stopPropagation();
+            onStock();
+          }}
+          style={{
+            ...btnGhost({ fg: C.cacao, border: C.sand }),
+            padding: "5px 10px",
+            fontSize: 10,
+            letterSpacing: 1,
+          }}
+        >
+          + Stock
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
+/**
+ * Skeleton row mostrado mientras `adminProductsApi.getAll()` está
+ * pending. Usa la misma grid del row real para que cuando llegue la
+ * data el operador no perciba salto de layout. El shimmer es un
+ * gradient animado en background — no requiere keyframe global porque
+ * el animation está inline.
+ */
+function SkeletonRow({ index }: { index: number }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: GRID_COLS,
+        padding: "14px 18px 14px 21px",
+        borderBottom: `1px solid ${C.sand}`,
+        alignItems: "center",
+        opacity: Math.max(0.3, 1 - index * 0.12),
+      }}
+    >
+      <SkeletonBar width="60%" />
+      <SkeletonBar width="50%" />
+      <SkeletonBar width="40%" />
+      <SkeletonBar width="30%" />
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <SkeletonBar width={60} />
       </div>
     </div>
   );
 }
 
-function RowButton({
-  onClick,
-  children,
-}: {
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
+function SkeletonBar({ width }: { width: string | number }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <span
+      aria-hidden
       style={{
-        padding: "5px 10px",
-        border: `1px solid ${C.sand}`,
-        background: C.paper,
-        color: C.cacao,
-        borderRadius: 999,
-        fontFamily: FONT_MONO,
-        fontSize: 10,
-        letterSpacing: 1.5,
-        cursor: "pointer",
-        textTransform: "uppercase",
-        fontWeight: 700,
+        display: "inline-block",
+        width,
+        height: 12,
+        borderRadius: 6,
+        background: `linear-gradient(90deg, ${C.parchment} 0%, ${C.sand} 50%, ${C.parchment} 100%)`,
+        backgroundSize: "200% 100%",
+        animation: "crown-skeleton-shimmer 1.4s ease-in-out infinite",
       }}
-    >
-      {children}
-    </button>
+    />
   );
 }
 
@@ -542,8 +1047,8 @@ function ErrorBanner({ text }: { text: string }) {
       style={{
         padding: 10,
         borderRadius: 8,
-        background: C.burgundySoft,
-        color: C.burgundy,
+        background: C.terracottaSoft,
+        color: C.terracotta,
         fontFamily: FONT_MONO,
         fontSize: 11,
         letterSpacing: 1.5,
@@ -556,26 +1061,27 @@ function ErrorBanner({ text }: { text: string }) {
   );
 }
 
-// ─── Product form modal (create + edit) ──────────────────────────────────────
+// ─── Product form modal (solo create) ────────────────────────────────────────
+//
+// Este modal SOLO se usa para crear productos nuevos. La edición pasó al
+// `ProductDetailPanel` (panel derecho contextual). Mantenemos el modal
+// para "Nuevo producto" porque crear es un flujo sin selección previa
+// — no encaja con el patrón "selecciona una fila para ver/editar".
 function ProductFormModal({
-  mode,
-  product,
   onClose,
   onSaved,
 }: {
-  mode: "create" | "edit";
-  product: Product | null;
+  mode: "create";
+  product: null;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [name, setName] = useState(product?.name ?? "");
-  const [description, setDescription] = useState(product?.description ?? "");
-  const [price, setPrice] = useState(String(product?.price ?? ""));
-  const [category, setCategory] = useState(product?.category ?? "");
-  const [stock, setStock] = useState(String(product?.stock ?? "0"));
-  const [threshold, setThreshold] = useState(
-    String(product?.low_stock_threshold ?? "0"),
-  );
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [price, setPrice] = useState("");
+  const [category, setCategory] = useState("");
+  const [stock, setStock] = useState("0");
+  const [threshold, setThreshold] = useState("0");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -585,24 +1091,14 @@ function ProductFormModal({
     setSubmitting(true);
     setError(null);
     try {
-      if (mode === "create") {
-        await adminProductsApi.create({
-          name: name.trim(),
-          description: description.trim() || undefined,
-          price: Number(price),
-          category: category.trim(),
-          stock: Number(stock) || 0,
-          low_stock_threshold: Number(threshold) || 0,
-        });
-      } else if (product) {
-        await adminProductsApi.update(product.id, {
-          name: name.trim(),
-          description: description.trim() || undefined,
-          price: Number(price),
-          category: category.trim(),
-          low_stock_threshold: Number(threshold) || 0,
-        });
-      }
+      await adminProductsApi.create({
+        name: name.trim(),
+        description: description.trim() || undefined,
+        price: Number(price),
+        category: category.trim(),
+        stock: Number(stock) || 0,
+        low_stock_threshold: Number(threshold) || 0,
+      });
       onSaved();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -612,7 +1108,7 @@ function ProductFormModal({
   }
 
   return (
-    <ModalShell title={mode === "create" ? "Nuevo producto" : `Editar ${product?.name}`} onClose={onClose}>
+    <ModalShell title="Nuevo producto" onClose={onClose}>
       <form onSubmit={submit} style={formStyle}>
         <Field label="Nombre">
           <input
@@ -647,18 +1143,16 @@ function ProductFormModal({
             style={inputStyle}
           />
         </Field>
-        {mode === "create" && (
-          <Field label="Stock inicial">
-            <input
-              type="number"
-              min={0}
-              step={1}
-              value={stock}
-              onChange={(e) => setStock(e.target.value)}
-              style={inputStyle}
-            />
-          </Field>
-        )}
+        <Field label="Stock inicial">
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={stock}
+            onChange={(e) => setStock(e.target.value)}
+            style={inputStyle}
+          />
+        </Field>
         <Field label="Umbral bajo stock (0 = sin alerta)">
           <input
             type="number"
@@ -685,436 +1179,6 @@ function ProductFormModal({
   );
 }
 
-// ─── Stock movement modal ────────────────────────────────────────────────────
-function StockMovementModal({
-  product,
-  onClose,
-  onSaved,
-}: {
-  product: Product;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  // The UI surfaces semantic actions; the wire payload always carries a
-  // signed delta (waste -> negative, restock -> positive, etc).
-  const [type, setType] = useState<InventoryMovementType>("restock");
-  const [amount, setAmount] = useState("1");
-  const [reason, setReason] = useState("");
-  const [notes, setNotes] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const labels: Record<
-    InventoryMovementType,
-    { title: string; helper: string; sign: 1 | -1 | 0 }
-  > = {
-    restock: {
-      title: "Reponer",
-      helper: "Unidades a sumar",
-      sign: 1,
-    },
-    waste: {
-      title: "Merma",
-      helper: "Unidades a desechar",
-      sign: -1,
-    },
-    adjustment: {
-      title: "Ajuste",
-      helper: "Delta firmado (+ suma / − resta)",
-      sign: 0,
-    },
-    correction: {
-      title: "Corrección",
-      helper: "Delta firmado para corregir un error previo",
-      sign: 0,
-    },
-  };
-  const meta = labels[type];
-
-  function computeQuantity(): number {
-    const n = Number(amount);
-    if (!Number.isFinite(n)) return NaN;
-    if (meta.sign === 1) return Math.abs(n);
-    if (meta.sign === -1) return -Math.abs(n);
-    return n; // adjustment / correction → use as-is
-  }
-
-  async function submit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (submitting) return;
-    const q = computeQuantity();
-    if (!Number.isFinite(q) || q === 0) {
-      setError("La cantidad debe ser distinta de cero.");
-      return;
-    }
-    setSubmitting(true);
-    setError(null);
-    try {
-      await inventoryMovementsApi.record(product.id, {
-        type,
-        quantity: q,
-        reason: reason.trim(),
-        notes: notes.trim() || undefined,
-      });
-      onSaved();
-    } catch (err) {
-      const code = (err as { response?: { data?: { code?: string } } })?.response
-        ?.data?.code;
-      const data = (err as { response?: { data?: Record<string, unknown> } })
-        ?.response?.data;
-      if (code === "STOCK_WOULD_GO_NEGATIVE") {
-        setError(
-          `Stock insuficiente. Actual: ${data?.current_stock}. Intento: ${data?.attempted_delta}.`,
-        );
-      } else {
-        setError(getErrorMessage(err));
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <ModalShell title={`Stock — ${product.name}`} onClose={onClose}>
-      <form onSubmit={submit} style={formStyle}>
-        <div
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 11,
-            letterSpacing: 1.5,
-            color: C.mute,
-            textTransform: "uppercase",
-          }}
-        >
-          Stock actual: <strong style={{ color: C.ink }}>{product.stock}</strong>
-        </div>
-
-        <Field label="Tipo de movimiento">
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {(
-              ["restock", "waste", "adjustment", "correction"] as const
-            ).map((t) => {
-              const active = type === t;
-              return (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setType(t)}
-                  style={{
-                    padding: "8px 12px",
-                    border: `1px solid ${active ? C.ink : C.sand}`,
-                    background: active ? C.ink : C.paper,
-                    color: active ? C.paper : C.cacao,
-                    borderRadius: 999,
-                    fontFamily: FONT_DISPLAY,
-                    fontSize: 12,
-                    letterSpacing: 2,
-                    textTransform: "uppercase",
-                    cursor: "pointer",
-                    fontWeight: 600,
-                  }}
-                >
-                  {labels[t].title}
-                </button>
-              );
-            })}
-          </div>
-        </Field>
-
-        <Field label={meta.helper}>
-          <input
-            type="number"
-            required
-            step={1}
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            style={inputStyle}
-          />
-          <div
-            style={{
-              marginTop: 5,
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              color: C.mute,
-              letterSpacing: 1,
-            }}
-          >
-            Delta a aplicar:{" "}
-            <strong style={{ color: C.ink }}>{computeQuantity() || 0}</strong>
-          </div>
-        </Field>
-
-        <Field label="Razón (obligatoria)">
-          <input
-            type="text"
-            required
-            minLength={3}
-            maxLength={200}
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            placeholder="Ej: entrega proveedor, botellas rotas, miscount..."
-            style={inputStyle}
-          />
-        </Field>
-
-        <Field label="Notas (opcional)">
-          <textarea
-            rows={2}
-            maxLength={500}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            style={{ ...inputStyle, resize: "vertical", fontFamily: FONT_UI }}
-          />
-        </Field>
-
-        {error && <ErrorBanner text={error} />}
-        <ModalActions onCancel={onClose} submitting={submitting} />
-      </form>
-    </ModalShell>
-  );
-}
-
-// ─── Per-product history drawer ──────────────────────────────────────────────
-function ProductHistoryDrawer({
-  product,
-  onClose,
-}: {
-  product: Product;
-  onClose: () => void;
-}) {
-  const [movements, setMovements] = useState<InventoryMovement[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setLoading(true);
-    inventoryMovementsApi
-      .listForProduct(product.id, { limit: 100 })
-      .then(setMovements)
-      .catch((e) => setError(getErrorMessage(e)))
-      .finally(() => setLoading(false));
-  }, [product.id]);
-
-  return (
-    <ModalShell
-      title={`Historial — ${product.name}`}
-      onClose={onClose}
-      wide
-    >
-      {error && <ErrorBanner text={error} />}
-      {loading && (
-        <div style={{ padding: 24, color: C.mute, fontFamily: FONT_MONO, fontSize: 11, letterSpacing: 2, textTransform: "uppercase" }}>
-          Cargando...
-        </div>
-      )}
-      {!loading && movements.length === 0 && (
-        <div style={{ padding: 32, color: C.mute, fontFamily: FONT_MONO, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", textAlign: "center" }}>
-          Sin movimientos
-        </div>
-      )}
-      <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-        {movements.map((m) => (
-          <MovementRow key={m.id} movement={m} />
-        ))}
-      </ul>
-    </ModalShell>
-  );
-}
-
-// ─── Movements tab (global ledger) ───────────────────────────────────────────
-function MovementsTab() {
-  const [movements, setMovements] = useState<InventoryMovement[]>([]);
-  const [type, setType] = useState<InventoryMovementType | "all">("all");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-    inventoryMovementsApi
-      .listGlobal({
-        type: type === "all" ? undefined : type,
-        limit: 200,
-      })
-      .then(setMovements)
-      .catch((e) => setError(getErrorMessage(e)))
-      .finally(() => setLoading(false));
-  }, [type]);
-
-  return (
-    <section>
-      <div
-        style={{
-          display: "flex",
-          gap: 6,
-          flexWrap: "wrap",
-          marginBottom: 14,
-          alignItems: "center",
-        }}
-      >
-        <span
-          style={{
-            fontFamily: FONT_MONO,
-            fontSize: 10,
-            letterSpacing: 2,
-            color: C.mute,
-            textTransform: "uppercase",
-            marginRight: 4,
-          }}
-        >
-          Tipo:
-        </span>
-        {(["all", "restock", "waste", "adjustment", "correction"] as const).map(
-          (t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setType(t)}
-              style={{
-                padding: "6px 12px",
-                borderRadius: 999,
-                border: `1px solid ${type === t ? C.ink : C.sand}`,
-                background: type === t ? C.ink : C.paper,
-                color: type === t ? C.paper : C.cacao,
-                fontFamily: FONT_MONO,
-                fontSize: 10,
-                letterSpacing: 1.5,
-                textTransform: "uppercase",
-                cursor: "pointer",
-                fontWeight: 700,
-              }}
-            >
-              {t === "all" ? "Todos" : t}
-            </button>
-          ),
-        )}
-      </div>
-
-      {error && <ErrorBanner text={error} />}
-
-      <div
-        style={{
-          background: C.paper,
-          border: `1px solid ${C.sand}`,
-          borderRadius: 14,
-          overflow: "hidden",
-        }}
-      >
-        {loading && (
-          <div style={{ padding: 24, color: C.mute, fontFamily: FONT_MONO, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", textAlign: "center" }}>
-            Cargando...
-          </div>
-        )}
-        {!loading && movements.length === 0 && (
-          <div style={{ padding: 32, color: C.mute, fontFamily: FONT_MONO, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", textAlign: "center" }}>
-            Sin movimientos
-          </div>
-        )}
-        <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-          {movements.map((m) => (
-            <MovementRow key={m.id} movement={m} showProductId />
-          ))}
-        </ul>
-      </div>
-    </section>
-  );
-}
-
-function MovementRow({
-  movement,
-  showProductId,
-}: {
-  movement: InventoryMovement;
-  showProductId?: boolean;
-}) {
-  const typeMeta: Record<
-    InventoryMovementType,
-    { label: string; bg: string; fg: string }
-  > = {
-    restock: { label: "Reposición", bg: C.oliveSoft, fg: C.olive },
-    waste: { label: "Merma", bg: C.burgundySoft, fg: C.burgundy },
-    adjustment: { label: "Ajuste", bg: C.sandDark, fg: C.ink },
-    correction: { label: "Corrección", bg: C.goldSoft, fg: C.cacao },
-  };
-  const m = typeMeta[movement.type];
-  const positive = movement.quantity > 0;
-  return (
-    <li
-      style={{
-        padding: "12px 18px",
-        borderBottom: `1px solid ${C.sand}`,
-        display: "grid",
-        gridTemplateColumns: "1fr auto",
-        gap: 6,
-      }}
-    >
-      <div>
-        <div
-          style={{
-            display: "flex",
-            gap: 6,
-            alignItems: "center",
-            flexWrap: "wrap",
-            fontFamily: FONT_MONO,
-            fontSize: 10,
-            letterSpacing: 1.5,
-            color: C.mute,
-            textTransform: "uppercase",
-          }}
-        >
-          <span
-            style={{
-              padding: "2px 8px",
-              borderRadius: 999,
-              background: m.bg,
-              color: m.fg,
-              fontWeight: 700,
-            }}
-          >
-            {m.label}
-          </span>
-          <span>
-            {new Date(movement.created_at).toLocaleString()}
-          </span>
-          {showProductId && (
-            <span style={{ color: C.cacao }}>· producto #{movement.product_id}</span>
-          )}
-        </div>
-        {movement.reason && (
-          <div
-            style={{
-              fontFamily: FONT_UI,
-              fontSize: 13,
-              color: C.cacao,
-              fontStyle: "italic",
-              marginTop: 4,
-            }}
-          >
-            “{movement.reason}”
-            {movement.created_by && (
-              <span style={{ marginLeft: 6, fontStyle: "normal", color: C.mute, fontSize: 11 }}>
-                · {movement.created_by}
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-      <div
-        style={{
-          fontFamily: FONT_DISPLAY,
-          fontSize: 18,
-          color: positive ? C.olive : C.burgundy,
-          letterSpacing: 0.5,
-          alignSelf: "center",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {positive ? "+" : ""}
-        {movement.quantity}
-      </div>
-    </li>
-  );
-}
 
 // ─── Reusable bits ───────────────────────────────────────────────────────────
 function ModalShell({
@@ -1179,14 +1243,13 @@ function ModalShell({
             type="button"
             aria-label="Cerrar"
             onClick={onClose}
+            className="crown-btn crown-btn-ghost"
             style={{
-              background: "transparent",
-              border: `1px solid ${C.sand}`,
-              borderRadius: 999,
+              ...btnGhost({ fg: C.cacao, border: C.sand }),
               width: 32,
               height: 32,
-              cursor: "pointer",
-              color: C.cacao,
+              padding: 0,
+              fontSize: 16,
             }}
           >
             ✕
@@ -1237,37 +1300,20 @@ function ModalActions({
     >
       <button
         type="button"
+        className="crown-btn crown-btn-ghost"
         onClick={onCancel}
-        style={{
-          padding: "9px 16px",
-          border: `1px solid ${C.sand}`,
-          background: "transparent",
-          color: C.cacao,
-          borderRadius: 999,
-          fontFamily: FONT_MONO,
-          fontSize: 11,
-          letterSpacing: 2,
-          cursor: "pointer",
-          textTransform: "uppercase",
-        }}
+        style={btnGhost({ fg: C.cacao, border: C.sand })}
       >
         Cancelar
       </button>
       <button
         type="submit"
         disabled={submitting}
-        style={{
-          padding: "9px 18px",
-          border: "none",
-          borderRadius: 999,
-          background: submitting ? C.sand : C.ink,
-          color: submitting ? C.mute : C.paper,
-          fontFamily: FONT_DISPLAY,
-          fontSize: 13,
-          letterSpacing: 2.5,
-          cursor: submitting ? "not-allowed" : "pointer",
-          textTransform: "uppercase",
-        }}
+        className="crown-btn crown-btn-primary"
+        style={btnPrimary({
+          bg: submitting ? C.sand : C.gold,
+          fg: submitting ? C.mute : C.paper,
+        })}
       >
         {submitting ? "Guardando..." : "Guardar"}
       </button>
@@ -1290,17 +1336,4 @@ const inputStyle: React.CSSProperties = {
   fontFamily: FONT_UI,
   fontSize: 14,
   outline: "none",
-};
-
-const primaryBtnStyle: React.CSSProperties = {
-  padding: "9px 16px",
-  border: "none",
-  borderRadius: 999,
-  background: `linear-gradient(135deg, ${C.gold} 0%, #C9944F 100%)`,
-  color: C.paper,
-  fontFamily: FONT_DISPLAY,
-  fontSize: 13,
-  letterSpacing: 3,
-  cursor: "pointer",
-  textTransform: "uppercase",
 };

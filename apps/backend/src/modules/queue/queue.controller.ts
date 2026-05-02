@@ -45,6 +45,11 @@ export class QueueController {
   /**
    * Per-table queue view. Customer (session token) can only request its own
    * table; admin can request any.
+   *
+   * `since` (ISO timestamp) trims the result to items created on/after that
+   * moment — used by the customer view to scope its queue to the current
+   * session and never inherit history from the previous occupant of the
+   * same physical table.
    */
   @Get()
   @UseGuards(JwtGuard)
@@ -53,6 +58,7 @@ export class QueueController {
     @CurrentAuth() auth: AuthPayload,
     @Query("table_id", ParseIntPipe) tableId: number,
     @Query("include_history") includeHistory?: string,
+    @Query("since") since?: string,
   ) {
     if (auth.kind === "session" && auth.table_id !== tableId) {
       throw new ForbiddenException({
@@ -60,7 +66,22 @@ export class QueueController {
         code: "AUTH_CROSS_TABLE",
       });
     }
-    return this.queueService.findByTable(tableId, includeHistory === "true");
+    let sinceDate: Date | undefined;
+    if (since) {
+      const d = new Date(since);
+      if (Number.isNaN(d.getTime())) {
+        throw new ForbiddenException({
+          message: "Invalid `since` timestamp",
+          code: "QUEUE_INVALID_SINCE",
+        });
+      }
+      sinceDate = d;
+    }
+    return this.queueService.findByTable(
+      tableId,
+      includeHistory === "true",
+      sinceDate,
+    );
   }
 
   /**

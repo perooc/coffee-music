@@ -45,7 +45,7 @@ function AdminGuard({ children }: { children: ReactNode }) {
           justifyContent: "center",
           background: "#FDF8EC",
           color: "#A89883",
-          fontFamily: "var(--font-oswald), monospace",
+          fontFamily: "var(--font-manrope), system-ui, sans-serif",
           fontSize: 11,
           letterSpacing: 3,
           textTransform: "uppercase",

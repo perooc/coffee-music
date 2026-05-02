@@ -1,5 +1,10 @@
 import type { Metadata } from "next";
-import { Bebas_Neue, Manrope, Oswald } from "next/font/google";
+import {
+  Bebas_Neue,
+  Manrope,
+  Oswald,
+  UnifrakturCook,
+} from "next/font/google";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -17,6 +22,15 @@ const bebas = Bebas_Neue({
 
 const oswald = Oswald({
   variable: "--font-oswald",
+  subsets: ["latin"],
+  display: "swap",
+});
+
+// Old English / blackletter for marquee titles and scoreboard numbers —
+// the Crown Bar identity leans into the "old pub" register.
+const blackletter = UnifrakturCook({
+  variable: "--font-blackletter",
+  weight: "700",
   subsets: ["latin"],
   display: "swap",
 });
@@ -42,7 +56,7 @@ export default function RootLayout({
   return (
     <html
       lang="es"
-      className={`${manrope.variable} ${bebas.variable} ${oswald.variable} h-full antialiased`}
+      className={`${manrope.variable} ${bebas.variable} ${oswald.variable} ${blackletter.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

@@ -31,7 +31,14 @@ const ACTIVE_STATUSES: OrderStatus[] = [
 ];
 
 const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  [OrderStatus.accepted]: [OrderStatus.preparing, OrderStatus.cancelled],
+  // Direct accepted→delivered is the default UI flow today (single
+  // "ENTREGAR" button); the legacy preparing / ready intermediates remain
+  // valid so we can re-enable a kitchen-screen flow without a migration.
+  [OrderStatus.accepted]: [
+    OrderStatus.delivered,
+    OrderStatus.preparing,
+    OrderStatus.cancelled,
+  ],
   [OrderStatus.preparing]: [OrderStatus.ready, OrderStatus.cancelled],
   [OrderStatus.ready]: [OrderStatus.delivered, OrderStatus.cancelled],
   [OrderStatus.delivered]: [],
