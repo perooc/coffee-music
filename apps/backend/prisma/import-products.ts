@@ -1,9 +1,14 @@
 /**
  * One-shot importer for the bar's product catalogue.
  *
- *   npm run db:import-products -- <path-to-xlsx-or-csv>
+ *   npm run db:import-products -- <path-to-xlsx-or-csv> [sheet-name]
  *
- * Reads a single sheet, expects (at least) these columns by header name:
+ * Sheet selection: if a workbook has multiple sheets, pass the sheet name
+ * as the second argument. Defaults to "COSTO UNITARIO Y MARGEN POR PRO"
+ * (the live catalogue's sheet name) and falls back to the first sheet if
+ * that one isn't found.
+ *
+ * Reads expected columns by header name (case + accent insensitive):
  *
  *     Producto    →  Product.name        (string, required)
  *     Tipo        →  Product.category    (string, required)
@@ -85,11 +90,26 @@ async function main() {
 
   console.log(`[import-products] Reading ${filePath}`);
   const workbook = XLSX.readFile(filePath);
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) {
+  if (workbook.SheetNames.length === 0) {
     console.error("[import-products] Workbook has no sheets");
     process.exit(1);
   }
+
+  // CLI override > live-catalogue default > first sheet fallback. We
+  // resolve case-insensitively because the source workbook's sheet name
+  // is in all-caps with spaces and a couple of special chars.
+  const requestedSheet =
+    process.argv[3] ?? "COSTO UNITARIO Y MARGEN POR PRO";
+  const matchedName = workbook.SheetNames.find(
+    (n) => n.trim().toLowerCase() === requestedSheet.trim().toLowerCase(),
+  );
+  const sheetName = matchedName ?? workbook.SheetNames[0];
+  if (!matchedName) {
+    console.warn(
+      `[import-products] Sheet "${requestedSheet}" not found. Falling back to "${sheetName}". Available sheets: ${workbook.SheetNames.join(", ")}`,
+    );
+  }
+
   const sheet = workbook.Sheets[sheetName];
   const rows = XLSX.utils.sheet_to_json<RawRow>(sheet, { defval: null });
   console.log(
