@@ -46,29 +46,38 @@ export class TableSessionsService {
       throw new NotFoundException(`Table ${tableId} not found`);
     }
 
-    const session = await this.prisma.$transaction(async (tx) => {
-      // Pre-flight: if the table already has an active session, force-close
-      // it BEFORE creating the new one. We cannot rely on a try/catch around
-      // the unique-constraint violation: in Postgres, once any statement in
-      // a transaction errors, the rest is rejected with 25P02
-      // ("transaction is aborted") — the cleanup attempt would itself fail.
+    // Multi-device sharing: when several phones at the same table reach
+    // the entry view (one scans, the other types the bar code, etc.), we
+    // want them all to JOIN the existing session — not each open their
+    // own and auto-close the previous one. The shared session is what
+    // makes the queue, the bill, and the orders feel collaborative.
+    const result = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.tableSession.findFirst({
         where: { table_id: tableId, status: { in: NON_CLOSED } },
-        select: { id: true },
       });
       if (existing) {
-        this.logger.warn(
-          `Open session conflict on table ${tableId}; auto-closing stale session ${existing.id}`,
+        this.logger.log(
+          `open(): joining existing session ${existing.id} on table ${tableId}`,
         );
-        await this.forceCloseActiveForTable(tableId, tx);
+        return { session: existing, isNew: false };
       }
-      return this.createAndProject(tableId, tx);
+      const created = await this.createAndProject(tableId, tx);
+      return { session: created, isNew: true };
     });
 
-    this.realtime.emitTableSessionOpened(session.id, this.serialize(session));
-    const snapshot = await this.projection.snapshotForBroadcast(tableId);
-    if (snapshot) this.realtime.emitTableUpdated(snapshot);
-    return session;
+    // Only broadcast `opened` for genuinely new sessions. Joining an
+    // existing session is silent — there's no state change for other
+    // listeners; the joining client will hydrate via the regular
+    // session_token path.
+    if (result.isNew) {
+      this.realtime.emitTableSessionOpened(
+        result.session.id,
+        this.serialize(result.session),
+      );
+      const snapshot = await this.projection.snapshotForBroadcast(tableId);
+      if (snapshot) this.realtime.emitTableUpdated(snapshot);
+    }
+    return result.session;
   }
 
   private async createAndProject(
@@ -80,20 +89,6 @@ export class TableSessionsService {
     });
     await this.projection.onSessionOpened(tableId, session.id, tx);
     return session;
-  }
-
-  private async forceCloseActiveForTable(tableId: number, tx: Tx) {
-    await tx.tableSession.updateMany({
-      where: { table_id: tableId, status: { in: NON_CLOSED } },
-      data: {
-        status: TableSessionStatus.closed,
-        closed_at: new Date(),
-      },
-    });
-    await tx.table.update({
-      where: { id: tableId },
-      data: { current_session_id: null },
-    });
   }
 
   async close(sessionId: number): Promise<TableSession> {

@@ -12,19 +12,26 @@ import type { MusicSearchProvider, MusicSearchResult } from "./music-search.prov
  * 2. Get durations with /videos?part=contentDetails
  */
 export class YouTubeDataApiProvider implements MusicSearchProvider {
-  readonly name = "youtube-data-api";
+  readonly name: string;
   private readonly logger = new Logger(YouTubeDataApiProvider.name);
   private readonly apiKey: string;
   private readonly baseUrl = "https://www.googleapis.com/youtube/v3";
 
-  constructor() {
-    const key = process.env.YOUTUBE_API_KEY;
+  /**
+   * @param apiKey — explicit key. When omitted, falls back to
+   *   `YOUTUBE_API_KEY` from the environment for back-compat.
+   * @param label — appended to `provider.name` so logs and the hybrid
+   *   metrics can tell instances apart when multiple keys are wired up.
+   */
+  constructor(apiKey?: string, label?: string) {
+    const key = apiKey ?? process.env.YOUTUBE_API_KEY ?? "";
     if (!key) {
       this.logger.warn(
-        "YOUTUBE_API_KEY not set — YouTube Data API provider will return empty results",
+        "YouTube Data API provider has no key — search calls will return empty",
       );
     }
-    this.apiKey = key ?? "";
+    this.apiKey = key;
+    this.name = label ? `youtube-data-api(${label})` : "youtube-data-api";
   }
 
   async search(query: string, limit: number): Promise<MusicSearchResult[]> {

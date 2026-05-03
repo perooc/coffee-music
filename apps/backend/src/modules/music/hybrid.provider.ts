@@ -8,40 +8,54 @@ type ProviderResult =
   | { ok: false; error: string };
 
 /**
- * Hybrid music search provider.
+ * One YouTube-API instance with its own quota budget. The hybrid provider
+ * holds a list of these and walks them in order: when the first one's
+ * soft budget is exhausted (or it 403s), it moves to the next without
+ * waiting for the next-day reset. ytsr is always last.
+ */
+export interface YouTubeApiKeySlot {
+  provider: MusicSearchProvider;
+  budget: QuotaBudget;
+}
+
+/**
+ * Hybrid music search provider with N-key fallback chain.
  *
  * Strategy:
- * 1. Cache first — respond from cache if query was searched recently
- * 2. If quota budget OK → YouTube Data API (primary) → ytsr (fallback)
- * 3. If budget high  → ytsr (primary) → YouTube API (fallback)
- * 4. Both return empty legitimately → [] (cached so we don't retry)
- * 5. Both fail with errors → throw so controller returns 503
+ *   1. Cache first — respond from cache if query was searched recently.
+ *   2. Walk the YouTube-API keys in order. For each key:
+ *        - if the soft budget is exhausted → skip to next.
+ *        - call the API. On success, cache + return.
+ *        - on transient/quota error (403, 429, network) → skip to next.
+ *   3. Last resort: ytsr (no key needed, scrapes YouTube directly).
+ *   4. Every provider failed with an error → throw SEARCH_UNAVAILABLE.
+ *   5. Every provider returned empty legitimately → [] (cached).
  *
  * Config via environment:
- * - YOUTUBE_DAILY_BUDGET_SOFT_LIMIT (default: 8000 units)
- * - SEARCH_CACHE_TTL_SECONDS (default: 1800 = 30 min)
+ *   - YOUTUBE_API_KEY        first key (primary).
+ *   - YOUTUBE_API_KEY_2      second key (mid fallback). Optional.
+ *   - YOUTUBE_API_KEY_3 ...  additional keys, picked up if defined.
+ *   - YOUTUBE_DAILY_BUDGET_SOFT_LIMIT (default 8000) — applies to EACH key.
+ *   - SEARCH_CACHE_TTL_SECONDS (default 1800).
  */
 export class HybridMusicProvider implements MusicSearchProvider {
   readonly name = "hybrid";
   private readonly logger = new Logger(HybridMusicProvider.name);
   private readonly cache: SearchCache;
-  private readonly budget: QuotaBudget;
+  private readonly slots: YouTubeApiKeySlot[];
 
   constructor(
-    private readonly youtubeApi: MusicSearchProvider,
+    youtubeApiSlots: YouTubeApiKeySlot[],
     private readonly ytsr: MusicSearchProvider,
   ) {
     const cacheTtl = parseInt(process.env.SEARCH_CACHE_TTL_SECONDS ?? "1800", 10);
-    const budgetLimit = parseInt(
-      process.env.YOUTUBE_DAILY_BUDGET_SOFT_LIMIT ?? "8000",
-      10,
-    );
-
     this.cache = new SearchCache(cacheTtl);
-    this.budget = new QuotaBudget(budgetLimit);
+    this.slots = youtubeApiSlots;
 
     this.logger.log(
-      `Hybrid provider initialized — cache TTL: ${cacheTtl}s, budget limit: ${budgetLimit} units`,
+      `Hybrid provider initialized — cache TTL: ${cacheTtl}s, ` +
+        `${this.slots.length} YouTube-API key(s), ` +
+        `last-resort: ${this.ytsr.name}`,
     );
 
     // Prune cache every 5 minutes
@@ -56,53 +70,67 @@ export class HybridMusicProvider implements MusicSearchProvider {
       return cached;
     }
 
-    // Step 2: Decide primary provider based on budget
-    const budgetOk = this.budget.canAfford();
-    const primary = budgetOk ? this.youtubeApi : this.ytsr;
-    const fallback = budgetOk ? this.ytsr : this.youtubeApi;
+    let anyHardError = false;
+    let anyLegitimateEmpty = false;
 
-    // Step 3: Try primary
-    const primaryResult = await this.tryProvider(primary, query, limit);
-
-    if (primaryResult.ok && primaryResult.results.length > 0) {
-      if (primary === this.youtubeApi) this.budget.consume();
-      this.cache.set(query, limit, primaryResult.results);
-      this.logSearch(primary.name, query, primaryResult.results.length);
-      return primaryResult.results;
-    }
-
-    // Primary returned empty or errored — try fallback
-    const primaryFailed = !primaryResult.ok;
-    if (primaryFailed) {
+    // Step 2: Walk the YouTube-API keys in order. Each key has its own
+    // budget; when one runs out we move on instead of falling all the way
+    // through to ytsr.
+    for (const slot of this.slots) {
+      if (!slot.budget.canAfford()) {
+        this.logger.warn(
+          `Skipping ${slot.provider.name}: daily soft budget exhausted`,
+        );
+        continue;
+      }
+      const result = await this.tryProvider(slot.provider, query, limit);
+      if (result.ok && result.results.length > 0) {
+        slot.budget.consume();
+        this.cache.set(query, limit, result.results);
+        this.logSearch(slot.provider.name, query, result.results.length);
+        return result.results;
+      }
+      if (result.ok) {
+        // Legitimate empty from this provider. Try the next key — its
+        // index might surface a result the others missed. If everything
+        // returns empty we'll cache [] at the end.
+        anyLegitimateEmpty = true;
+        slot.budget.consume();
+        continue;
+      }
+      anyHardError = true;
       this.logger.warn(
-        `Primary "${primary.name}" failed: ${primaryResult.error} — trying "${fallback.name}"`,
+        `Provider ${slot.provider.name} failed: ${result.error} — trying next key`,
       );
     }
 
-    // Step 4: Try fallback
-    const fallbackResult = await this.tryProvider(fallback, query, limit);
-
-    if (fallbackResult.ok && fallbackResult.results.length > 0) {
-      if (fallback === this.youtubeApi) this.budget.consume();
-      this.cache.set(query, limit, fallbackResult.results);
-      this.logSearch(`${fallback.name} (fallback)`, query, fallbackResult.results.length);
-      return fallbackResult.results;
+    // Step 3: ytsr as last resort.
+    const ytsrResult = await this.tryProvider(this.ytsr, query, limit);
+    if (ytsrResult.ok && ytsrResult.results.length > 0) {
+      this.cache.set(query, limit, ytsrResult.results);
+      this.logSearch(`${this.ytsr.name} (fallback)`, query, ytsrResult.results.length);
+      return ytsrResult.results;
+    }
+    if (ytsrResult.ok) {
+      anyLegitimateEmpty = true;
+    } else {
+      anyHardError = true;
+      this.logger.warn(
+        `Provider ${this.ytsr.name} failed: ${ytsrResult.error}`,
+      );
     }
 
-    // Step 5: Both done — distinguish empty vs error
-    const bothErrored = primaryFailed && !fallbackResult.ok;
-
-    if (bothErrored) {
-      // Both providers failed with technical errors — throw so the
-      // controller can return 503 instead of misleading empty results
+    // Step 4: All providers came back. Distinguish hard error vs empty.
+    if (!anyLegitimateEmpty && anyHardError) {
       this.logger.error(
-        `Both providers failed for "${query}" — primary: ${primaryResult.error}, fallback: ${(fallbackResult as { error: string }).error}`,
+        `Every search provider failed for "${query}". ` +
+          `The customer/admin will see SEARCH_UNAVAILABLE.`,
       );
       throw new Error("SEARCH_UNAVAILABLE");
     }
 
-    // At least one provider responded successfully but with 0 results —
-    // this is a legitimate empty result. Cache it to avoid retrying.
+    // At least one provider responded successfully with 0 results.
+    // Cache so we don't retry.
     this.cache.set(query, limit, []);
     this.logSearch("empty (legitimate)", query, 0);
     return [];
@@ -130,8 +158,14 @@ export class HybridMusicProvider implements MusicSearchProvider {
         source,
         query,
         results_count: count,
-        budget_used: this.budget.used,
-        budget_remaining: this.budget.remaining,
+        // Per-slot budget rollup for observability. Dashboards can split
+        // this and alert when any single key crosses 90%.
+        budgets: this.slots.map((s, i) => ({
+          slot: i + 1,
+          name: s.provider.name,
+          used: s.budget.used,
+          remaining: s.budget.remaining,
+        })),
         cache_size: this.cache.size,
       }),
     );

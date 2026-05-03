@@ -97,6 +97,21 @@ export function OrderRequestCart({
     }
   }, [open, editing]);
 
+  // Lock the page's scroll while the modal is open. We set
+  // `overflow: hidden` on the body so the page underneath can't move,
+  // but we DON'T set touch-action there — that would also disable the
+  // pinch/zoom-style gestures inside the modal on some Android builds.
+  // Inner scroll containers explicitly opt back into `pan-y` to keep
+  // their gesture surface alive.
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
+
   const cartEntries = useMemo(
     () =>
       Object.entries(cart)
@@ -237,7 +252,12 @@ export function OrderRequestCart({
         style={{
           width: "100%",
           maxWidth: 540,
-          maxHeight: "92dvh",
+          // Fixed height (not max-height): without a definite height the
+          // flex children can't compute a real `flex: 1` size, so the
+          // inner overflow:auto hands the scroll to the page behind. With
+          // 92dvh the rail has a concrete budget and the lists scroll
+          // inside the sheet as expected.
+          height: "92dvh",
           background: "#FFFDF8",
           borderRadius: "20px 20px 0 0",
           display: "flex",
@@ -338,12 +358,21 @@ export function OrderRequestCart({
           </button>
         </header>
 
-        {/* Sliding rail: two views side by side, translate to switch. */}
+        {/* Sliding rail: two views side by side, translate to switch.
+            `minHeight: 0` is critical — without it the flex item refuses
+            to shrink below its content's natural height, the inner
+            overflow:auto stops working, and on mobile the scroll bleeds
+            through to the page behind the overlay.
+            `touchAction: pan-y` re-enables vertical gestures inside this
+            sub-tree; the body has touchAction:none while the modal is
+            open and CSS inherits that down the tree. */}
         <div
           style={{
             flex: 1,
+            minHeight: 0,
             overflow: "hidden",
             position: "relative",
+            touchAction: "pan-y",
           }}
         >
           <div
@@ -501,6 +530,13 @@ function CategoriesView({
         width: "50%",
         height: "100%",
         overflowY: "auto",
+        overscrollBehavior: "contain",
+        WebkitOverflowScrolling: "touch",
+        // Without `touchAction: pan-y` iOS sometimes assigns the gesture
+        // to the parent backdrop (which has touchAction:none from the
+        // body lock). pan-y explicitly says "this region scrolls
+        // vertically — don't hijack the touch".
+        touchAction: "pan-y",
         padding: "16px 22px 18px",
       }}
     >
@@ -659,6 +695,9 @@ function ProductsView({
         width: "50%",
         height: "100%",
         overflowY: "auto",
+        overscrollBehavior: "contain",
+        WebkitOverflowScrolling: "touch",
+        touchAction: "pan-y",
         padding: "14px 22px 18px",
       }}
     >

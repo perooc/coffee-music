@@ -444,20 +444,21 @@ export default function MesaPage({
     tableSessionsApi
       .getCurrentForTable(tableId)
       .then((s) => {
-        // The server may have an open session for this physical table that
-        // does NOT belong to this device (different customer, or our local
-        // session_token is stale / from before a reseed). Without a token
-        // we'd just spam 401s on every customer-API call. Render the entry
-        // view instead.
+        // No token in this device → render the entry view so the user
+        // taps "Iniciar mesa" and joins the existing session (or opens
+        // a new one if there is none). Without a token we can't make
+        // session-scoped calls, so we don't try.
         const stored = getSessionToken();
         if (s && !stored) {
           setSession(null);
           return;
         }
-        // If our stored token is for a different session_id than the one
-        // the table currently has open, it is stale (e.g. backend reseeded,
-        // or a different customer is now at the table). Drop it and fall
-        // back to the entry view to mint a fresh token.
+        // Multi-device sharing: a token whose embedded session_id no
+        // longer matches the table's current session means a new session
+        // started since this device last used the app (the bar closed
+        // the previous one and a new group is sitting now, or a reseed
+        // happened). Drop the stale token but DON'T evict if the ids
+        // match — that case is normal and means we're rejoining.
         if (s && stored) {
           const payloadId = decodeJwtSessionId(stored);
           if (payloadId != null && payloadId !== s.id) {
@@ -758,6 +759,9 @@ export default function MesaPage({
                 onOpenCart={() => setCartMode({ kind: "create" })}
                 onEditRequest={(r) => setCartMode({ kind: "edit", request: r })}
                 onOpenBill={() => setBillModalOpen(true)}
+                onRequestUpdated={(request) => {
+                  setMyRequests((prev) => upsertById(prev, request));
+                }}
                 disableCreateOrder={orderCreationDisabled}
                 paymentRequested={!!session.payment_requested_at}
                 paid={!!session.paid_at}
@@ -1059,6 +1063,7 @@ function OrdersTab({
   onOpenCart,
   onEditRequest,
   onOpenBill,
+  onRequestUpdated,
   disableCreateOrder,
   paymentRequested,
   paid,
@@ -1072,6 +1077,15 @@ function OrdersTab({
   onOpenCart: () => void;
   onEditRequest: (r: OrderRequest) => void;
   onOpenBill: () => void;
+  /**
+   * Seeds the parent's `myRequests` after a customer-side mutation. We
+   * call this with the OrderRequest the server returned (status updated
+   * to e.g. "cancelled") so the row reflects the change instantly even
+   * if the matching socket event is dropped — iOS Safari sometimes loses
+   * the first event after joining a freshly-minted room. The eventual
+   * socket arrival is harmless because `upsertById` upstream dedupes.
+   */
+  onRequestUpdated: (request: OrderRequest) => void;
   disableCreateOrder: boolean;
   paymentRequested: boolean;
   paid: boolean;
@@ -1105,7 +1119,13 @@ function OrdersTab({
       return next;
     });
     try {
-      await orderRequestsApi.cancel(r.id);
+      const updated = await orderRequestsApi.cancel(r.id);
+      // Seed the parent state immediately. The socket may also fire
+      // `order-request:updated` shortly after; that's a harmless no-op
+      // since the parent uses `upsertById`. Without this seed the row
+      // stays as "pending" on screen and the user double-clicks cancel,
+      // hitting ORDER_REQUEST_NOT_PENDING the second time.
+      onRequestUpdated(updated);
     } catch (err) {
       const code = (err as { response?: { data?: { code?: string } } })
         ?.response?.data?.code;

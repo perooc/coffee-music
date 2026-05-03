@@ -1,9 +1,15 @@
-import axios, { AxiosInstance, InternalAxiosRequestConfig } from "axios";
+import axios, {
+  AxiosError,
+  AxiosInstance,
+  AxiosRequestConfig,
+  InternalAxiosRequestConfig,
+} from "axios";
 import {
   clearAdminToken,
   getAdminToken,
   getSessionToken,
   getTableToken,
+  setSessionToken,
 } from "../auth/token-storage";
 
 /**
@@ -100,23 +106,91 @@ export function registerCustomerAuthFailureHandler(fn: () => void) {
   onCustomerAuthFailure = fn;
 }
 
+// ─── Table client (QR → pre-session) ──────────────────────────────────────
+// Used only for the two endpoints that run before a session exists:
+//   - GET /tables/:id/session/current
+//   - POST /table-sessions/open
+//   - POST /table-sessions/refresh   ← used by the customerApi interceptor
+// Attaches table_token from sessionStorage.
+export const tableApi = createClient(getTableToken, "table");
+
+/**
+ * Background recovery for the customer client.
+ *
+ * Why: iOS Safari and Chrome Android suspend WebSockets and HTTP
+ * connections aggressively when the device is locked or the tab loses
+ * focus. The first request after wake-up frequently lands a 401 even
+ * though the underlying TableSession is still open in the database.
+ * Showing "Sesión expirada" in that case is a hostile UX — the customer
+ * loses their context and has to re-scan the QR.
+ *
+ * Strategy: when a customer request fails with 401/403, we hold the
+ * caller and try to mint a fresh session_token through the table_token
+ * (which is long-lived, 365d). The new endpoint `/table-sessions/refresh`
+ * returns the active session for the table or 404 if there isn't one.
+ *   - 200: replay the original request with the new token, surface the
+ *          response to the caller as if nothing happened.
+ *   - 404 (TABLE_SESSION_NOT_OPEN): the session is genuinely gone (admin
+ *          closed it, day rolled over). Fall through to onCustomerAuthFailure
+ *          so the UI shows the recovery card.
+ *   - anything else: same — surface as auth failure rather than retry.
+ *
+ * In-flight requests share a single refresh promise so a thundering herd
+ * (5 requests racing on wake-up) doesn't fire 5 refresh round-trips.
+ */
+let refreshInFlight: Promise<string | null> | null = null;
+
+async function refreshSessionToken(): Promise<string | null> {
+  if (refreshInFlight) return refreshInFlight;
+  // No table token at all → we can't recover; nothing to do.
+  if (!getTableToken()) return null;
+  refreshInFlight = (async () => {
+    try {
+      const res = await tableApi.post<{ session_token?: string }>(
+        "/table-sessions/refresh",
+      );
+      const token = res.data?.session_token;
+      if (typeof token === "string" && token.length > 0) {
+        setSessionToken(token);
+        return token;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      // Reset for the next wake-up cycle.
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
 customerApi.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error: AxiosError) => {
     const status = error?.response?.status;
-    if (status === 401 || status === 403) {
+    const originalConfig = error.config as
+      | (AxiosRequestConfig & { __retried?: boolean })
+      | undefined;
+
+    if ((status === 401 || status === 403) && originalConfig && !originalConfig.__retried) {
+      const fresh = await refreshSessionToken();
+      if (fresh) {
+        // Replay the original request with the new token. We mark it to
+        // avoid an infinite loop if the second attempt also 401s.
+        originalConfig.__retried = true;
+        if (!originalConfig.headers) originalConfig.headers = {};
+        (originalConfig.headers as Record<string, string>)["Authorization"] =
+          `Bearer ${fresh}`;
+        return customerApi.request(originalConfig);
+      }
+      // Refresh failed → the session is genuinely closed. Surface the
+      // existing "scan again" recovery flow.
       onCustomerAuthFailure();
     }
     return Promise.reject(error);
   },
 );
-
-// ─── Table client (QR → pre-session) ──────────────────────────────────────
-// Used only for the two endpoints that run before a session exists:
-//   - GET /tables/:id/session/current
-//   - POST /table-sessions/open
-// Attaches table_token from sessionStorage.
-export const tableApi = createClient(getTableToken, "table");
 
 // ─── Public client (no token) ─────────────────────────────────────────────
 // Products catalog, music search, queue reads, health. Exported for call

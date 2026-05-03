@@ -19,7 +19,20 @@ export interface YouTubeVideoMeta {
 @Injectable()
 export class HousePlaylistService {
   private readonly logger = new Logger(HousePlaylistService.name);
-  private readonly apiKey = process.env.YOUTUBE_API_KEY ?? "";
+  /**
+   * Ordered list of YouTube API keys, same convention as MusicModule:
+   *   YOUTUBE_API_KEY      — primary
+   *   YOUTUBE_API_KEY_2..N — fallbacks, used when an earlier key 403s
+   *
+   * We don't keep a per-key budget here because validations are very
+   * cheap (1 unit per call) and rare (admin-side only). When a key
+   * returns 403 we just walk to the next one.
+   */
+  private readonly apiKeys: string[] = [
+    process.env.YOUTUBE_API_KEY ?? "",
+    process.env.YOUTUBE_API_KEY_2 ?? "",
+    process.env.YOUTUBE_API_KEY_3 ?? "",
+  ].filter((k) => k.length > 0);
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -145,44 +158,21 @@ export class HousePlaylistService {
         code: "HOUSE_PLAYLIST_INVALID_URL",
       });
     }
-    if (!this.apiKey) {
+    if (this.apiKeys.length === 0) {
       throw new ServiceUnavailableException({
         message: "Validación de YouTube no disponible (API key no configurada)",
         code: "HOUSE_PLAYLIST_API_DISABLED",
       });
     }
 
-    const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-    url.searchParams.set("part", "snippet,contentDetails,status");
-    url.searchParams.set("id", youtubeId);
-    url.searchParams.set("key", this.apiKey);
+    // Try each configured API key in order. A 403 on key #1 (quota
+    // exhausted, daily reset, billing issue) walks to key #2, then #3.
+    // Anything that's NOT a 403 is reported up — those are usually real
+    // problems with the video itself, not the key.
+    let lastQuotaError = false;
+    let lastNetworkError: string | null = null;
 
-    let res: Response;
-    try {
-      res = await fetch(url.toString());
-    } catch (err) {
-      this.logger.error(`fetch YouTube /videos failed: ${String(err)}`);
-      throw new ServiceUnavailableException({
-        message: "No se pudo validar la canción con YouTube",
-        code: "HOUSE_PLAYLIST_UPSTREAM_ERROR",
-      });
-    }
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      this.logger.error(`YouTube /videos returned ${res.status}: ${body}`);
-      if (res.status === 403) {
-        throw new ServiceUnavailableException({
-          message: "Cuota de YouTube agotada por hoy",
-          code: "HOUSE_PLAYLIST_QUOTA_EXCEEDED",
-        });
-      }
-      throw new ServiceUnavailableException({
-        message: "YouTube respondió con un error",
-        code: "HOUSE_PLAYLIST_UPSTREAM_ERROR",
-      });
-    }
-
-    const data = (await res.json()) as {
+    type YouTubeVideosResponse = {
       items?: Array<{
         id: string;
         snippet?: {
@@ -197,6 +187,64 @@ export class HousePlaylistService {
         status?: { embeddable?: boolean; uploadStatus?: string };
       }>;
     };
+
+    let data: YouTubeVideosResponse | null = null;
+
+    for (let i = 0; i < this.apiKeys.length; i++) {
+      const key = this.apiKeys[i];
+      const url = new URL("https://www.googleapis.com/youtube/v3/videos");
+      url.searchParams.set("part", "snippet,contentDetails,status");
+      url.searchParams.set("id", youtubeId);
+      url.searchParams.set("key", key);
+
+      let res: Response;
+      try {
+        res = await fetch(url.toString());
+      } catch (err) {
+        lastNetworkError = String(err);
+        this.logger.warn(
+          `fetch YouTube /videos failed on key #${i + 1}: ${lastNetworkError} — trying next key`,
+        );
+        continue;
+      }
+
+      if (res.ok) {
+        data = (await res.json()) as YouTubeVideosResponse;
+        break;
+      }
+
+      const body = await res.text().catch(() => "");
+      this.logger.warn(
+        `YouTube /videos returned ${res.status} on key #${i + 1}: ${body.slice(0, 200)}`,
+      );
+      if (res.status === 403) {
+        lastQuotaError = true;
+        continue; // try the next key
+      }
+      // Non-quota error (404, 400, 5xx) — abort, it's about this video.
+      throw new ServiceUnavailableException({
+        message: "YouTube respondió con un error",
+        code: "HOUSE_PLAYLIST_UPSTREAM_ERROR",
+      });
+    }
+
+    if (!data) {
+      // Every key was exhausted or every fetch failed at the network
+      // layer. Distinguish so the admin sees a useful message.
+      if (lastQuotaError) {
+        throw new ServiceUnavailableException({
+          message: "Cuota de YouTube agotada en todas las keys configuradas",
+          code: "HOUSE_PLAYLIST_QUOTA_EXCEEDED",
+        });
+      }
+      this.logger.error(
+        `All YouTube validation attempts failed — last network error: ${lastNetworkError}`,
+      );
+      throw new ServiceUnavailableException({
+        message: "No se pudo validar la canción con YouTube",
+        code: "HOUSE_PLAYLIST_UPSTREAM_ERROR",
+      });
+    }
 
     const item = data.items?.[0];
     if (!item) {

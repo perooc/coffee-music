@@ -56,6 +56,47 @@ export class TableSessionsController {
   }
 
   /**
+   * Refresh the session token without closing the underlying session.
+   *
+   * Used by the customer client to recover from a stale `session_token`
+   * (transient socket suspension on iOS, an expired JWT, etc.) without
+   * dropping the customer's in-flight pedidos. The QR's `table_token` is
+   * the source of authority — if its `table_id` still has an active
+   * session, we mint a fresh `session_token` for that same session id.
+   *
+   * Returns 404 (TABLE_SESSION_NOT_OPEN) when the table has no active
+   * session — that's the only legitimate "expired" case the client UI
+   * should surface as such. Anything else is recoverable in the
+   * background.
+   */
+  @Post("table-sessions/refresh")
+  @UseGuards(JwtGuard)
+  @AuthKinds("table")
+  async refresh(@CurrentAuth() auth: AuthPayload) {
+    if (auth.kind !== "table") {
+      throw new ForbiddenException({
+        message: "Table token required",
+        code: "AUTH_TABLE_REQUIRED",
+      });
+    }
+    const session = await this.sessions.getCurrentForTable(auth.table_id);
+    if (!session || session.status === "closed") {
+      throw new NotFoundException({
+        message: `Table ${auth.table_id} has no open session`,
+        code: "TABLE_SESSION_NOT_OPEN",
+      });
+    }
+    const session_token = this.tokens.signSession({
+      session_id: session.id,
+      table_id: session.table_id,
+    });
+    return {
+      ...this.sessions.serialize(session),
+      session_token,
+    };
+  }
+
+  /**
    * Staff closes a session manually. Customer-driven close would need its
    * own flow; today `closing` status is the softer path for that.
    */
