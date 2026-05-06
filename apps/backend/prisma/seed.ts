@@ -69,6 +69,8 @@ async function main() {
       { number: 2, qr_code: "mesa-2", status: TableStatus.available },
       { number: 3, qr_code: "mesa-3", status: TableStatus.available },
       { number: 4, qr_code: "mesa-4", status: TableStatus.available },
+      { number: 5, qr_code: "mesa-5", status: TableStatus.available },
+      { number: 6, qr_code: "mesa-6", status: TableStatus.available },
     ],
   });
 

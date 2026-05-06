@@ -11,6 +11,7 @@
   "dependencies": {
     "@coffee-bar/shared": "*",
     "@gsap/react": "^2.1.2",
+    "@sentry/nextjs": "^10.51.0",
     "@tanstack/react-query": "^5.99.0",
     "axios": "^1.15.0",
     "clsx": "^2.1.1",

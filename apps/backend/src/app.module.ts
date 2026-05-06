@@ -1,4 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule, RequestMethod } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
+import { SentryGlobalFilter } from "@sentry/nestjs/setup";
 import { AuthModule } from "./modules/auth/auth.module";
 import { ConsumptionsModule } from "./modules/consumptions/consumptions.module";
 import { DatabaseModule } from "./database/database.module";
@@ -38,6 +40,16 @@ import { PlaybackModule } from "./modules/playback/playback.module";
     TableProjectionModule,
     TableSessionsModule,
     TablesModule,
+  ],
+  providers: [
+    // SentryGlobalFilter forwards every uncaught exception to Sentry
+    // before falling through to Nest's default exception handler. The
+    // ignore-list lives in instrument.ts so 4xx noise doesn't reach the
+    // dashboard.
+    {
+      provide: APP_FILTER,
+      useClass: SentryGlobalFilter,
+    },
   ],
 })
 export class AppModule implements NestModule {

@@ -1,4 +1,8 @@
 import "dotenv/config";
+// Sentry instrumentation. MUST be the first import after dotenv — it
+// monkey-patches HTTP / Express modules at load time. Importing later
+// means those modules are already constructed and we miss traces.
+import "./instrument";
 import "reflect-metadata";
 import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
