@@ -150,7 +150,7 @@ function failedLoginHtml(opts: {
         ${opts.ip ? `<li>IP: <span style="color:#A89883;">${opts.ip}</span></li>` : ""}
       </ul>
       <p style="font-size:12px; color:#A89883; margin:18px 0 0; line-height:1.5;">
-        Si fuiste tú olvidando la contraseña, podés usar el enlace "¿Olvidaste tu contraseña?" en la pantalla de login. Si no, considerá rotar la contraseña preventivamente.
+        Si olvidaste la contraseña, puedes usar el enlace "¿Olvidaste tu contraseña?" en la pantalla de login. Si no, considera cambiar la contraseña preventivamente.
       </p>
     </div>
   </body>

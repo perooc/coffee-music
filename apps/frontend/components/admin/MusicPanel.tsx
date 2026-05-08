@@ -728,6 +728,8 @@ function AccessCodeWidget() {
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -752,15 +754,23 @@ function AccessCodeWidget() {
     };
   }, []);
 
-  const rotate = async () => {
-    if (!window.confirm("¿Generar un nuevo código? El actual dejará de funcionar."))
-      return;
+  // Auto-dismiss the success toast after a beat — it's a pure
+  // confirmation cue, the canonical state is the code rendered above.
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 2400);
+    return () => clearTimeout(id);
+  }, [toast]);
+
+  const performRotate = async () => {
+    setConfirmOpen(false);
     setBusy(true);
     setError(null);
     try {
       const data = await accessCodeApi.rotate();
       setCode(data.code);
       setExpiresAt(data.expires_at);
+      setToast(`Nuevo código generado: ${data.code}`);
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -817,7 +827,7 @@ function AccessCodeWidget() {
         </div>
         <button
           type="button"
-          onClick={rotate}
+          onClick={() => setConfirmOpen(true)}
           disabled={busy}
           className="crown-btn crown-btn-ghost"
           style={{
@@ -860,6 +870,170 @@ function AccessCodeWidget() {
           })}
         </span>
       )}
+
+      {confirmOpen && (
+        <RotateConfirmModal
+          busy={busy}
+          onCancel={() => setConfirmOpen(false)}
+          onConfirm={performRotate}
+        />
+      )}
+      {toast && <RotateToast text={toast} />}
+    </div>
+  );
+}
+
+function RotateConfirmModal({
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Confirmar rotación de código"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1000,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(43,29,20,0.45)",
+        backdropFilter: "blur(2px)",
+        WebkitBackdropFilter: "blur(2px)",
+        padding: 24,
+      }}
+      onClick={onCancel}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 360,
+          background: C.paper,
+          border: `1px solid ${C.sand}`,
+          borderRadius: 16,
+          padding: "22px 22px 18px",
+          boxShadow: "0 30px 80px -30px rgba(43,29,20,0.5)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            letterSpacing: 3,
+            color: C.gold,
+            textTransform: "uppercase",
+            fontWeight: 700,
+          }}
+        >
+          — Código del bar
+        </div>
+        <div
+          style={{
+            fontFamily: FONT_DISPLAY,
+            fontSize: 22,
+            color: C.ink,
+            letterSpacing: 1,
+            lineHeight: 1.1,
+          }}
+        >
+          ¿Generar un nuevo código?
+        </div>
+        <p
+          style={{
+            margin: 0,
+            fontFamily: FONT_UI,
+            fontSize: 13,
+            color: C.cacao,
+            lineHeight: 1.5,
+          }}
+        >
+          El código actual dejará de funcionar. Los clientes con sesión
+          abierta no se ven afectados; solo los nuevos accesos.
+        </p>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: 8,
+            marginTop: 4,
+          }}
+        >
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="crown-btn crown-btn-ghost"
+            style={{
+              ...btnGhost({ fg: C.cacao, border: C.sand }),
+              fontSize: 11,
+              padding: "8px 14px",
+              letterSpacing: 1.2,
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="crown-btn"
+            style={{
+              border: "none",
+              borderRadius: 999,
+              padding: "8px 16px",
+              fontSize: 11,
+              letterSpacing: 1.5,
+              textTransform: "uppercase",
+              fontFamily: FONT_DISPLAY,
+              fontWeight: 700,
+              color: C.paper,
+              background: busy
+                ? C.sand
+                : `linear-gradient(135deg, ${C.gold} 0%, #C9944F 100%)`,
+              cursor: busy ? "not-allowed" : "pointer",
+            }}
+          >
+            {busy ? "Generando..." : "Generar nuevo"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RotateToast({ text }: { text: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: "fixed",
+        bottom: 24,
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 1100,
+        padding: "10px 16px",
+        background: C.ink,
+        color: C.paper,
+        borderRadius: 999,
+        fontFamily: FONT_MONO,
+        fontSize: 12,
+        letterSpacing: 0.6,
+        boxShadow: "0 18px 40px -18px rgba(43,29,20,0.6)",
+      }}
+    >
+      ✓ {text}
     </div>
   );
 }

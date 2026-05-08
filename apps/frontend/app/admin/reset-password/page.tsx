@@ -291,13 +291,12 @@ function PasswordField({
             border: "none",
             cursor: "pointer",
             color: C.cacao,
-            fontSize: 16,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
           }}
         >
-          {show ? "🙈" : "👁"}
+          <EyeIcon hidden={show} />
         </button>
       </div>
     </label>
@@ -333,3 +332,39 @@ const inputStyle: React.CSSProperties = {
   outline: "none",
   width: "100%",
 };
+
+function EyeIcon({ hidden }: { hidden: boolean }) {
+  return hidden ? (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3.98 8.22A10.5 10.5 0 0 0 1.93 12c1.4 3.45 4.86 6 9.07 6 1.27 0 2.49-.23 3.6-.66M6.6 6.6A10.45 10.45 0 0 1 12 6c4.21 0 7.67 2.55 9.07 6a10.52 10.52 0 0 1-3.07 4.18M9.88 9.88A3 3 0 0 0 12 15a3 3 0 0 0 2.12-.88" />
+      <path d="M3 3l18 18" />
+    </svg>
+  ) : (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1.93 12C3.33 8.55 6.79 6 12 6s8.67 2.55 10.07 6c-1.4 3.45-4.86 6-10.07 6S3.33 15.45 1.93 12z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}

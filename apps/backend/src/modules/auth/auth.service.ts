@@ -207,17 +207,20 @@ export class AuthService {
           : null,
       },
     });
-    // Notify on every failure (not just lock) so the inbox is a real
-    // signal — three attempts at 4am from an unknown IP is still a
-    // story worth seeing.
-    await this.email
-      .sendFailedLoginAlert({
-        email,
-        failedAttempts: nextCount,
-        locked: willLock,
-        ip,
-      })
-      .catch((err) => this.logger.error(`alert email failed: ${err}`));
+    // Only email when the account actually locks. The owner asked us
+    // to drop the per-attempt notifications — five emails on a forgotten
+    // password is noise, not signal. Reaching the threshold is the
+    // event worth a real alert.
+    if (willLock) {
+      await this.email
+        .sendFailedLoginAlert({
+          email,
+          failedAttempts: nextCount,
+          locked: true,
+          ip,
+        })
+        .catch((err) => this.logger.error(`alert email failed: ${err}`));
+    }
   }
 
   private serialize(user: {

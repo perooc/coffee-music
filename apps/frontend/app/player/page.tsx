@@ -383,27 +383,31 @@ function PlayerAccessCode() {
     <div
       aria-label="Código del bar"
       style={{
+        // Sits in normal flow at the top of the header instead of
+        // floating absolutely — that way it can't overlap the playback
+        // frame's title/duration overlay no matter the screen ratio.
         position: "absolute",
-        top: 18,
-        right: 22,
+        top: 22,
+        left: "50%",
+        transform: "translateX(-50%)",
         zIndex: 5,
         display: "flex",
-        flexDirection: "column",
-        alignItems: "flex-end",
-        gap: 2,
-        padding: "10px 14px",
-        background: "rgba(11,15,20,0.55)",
+        alignItems: "center",
+        gap: 12,
+        padding: "8px 16px",
+        background: "rgba(11,15,20,0.7)",
         border: `1px solid ${D.gold}33`,
-        borderRadius: 12,
+        borderRadius: 999,
         backdropFilter: "blur(6px)",
         WebkitBackdropFilter: "blur(6px)",
+        boxShadow: "0 12px 30px -12px rgba(0,0,0,0.7)",
       }}
     >
       <span
         style={{
           fontFamily: FONT_MONO,
-          fontSize: 9,
-          letterSpacing: 3,
+          fontSize: 10,
+          letterSpacing: 2.5,
           color: D.gold,
           textTransform: "uppercase",
           fontWeight: 700,
@@ -414,9 +418,9 @@ function PlayerAccessCode() {
       <span
         style={{
           fontFamily: FONT_DISPLAY,
-          fontSize: 32,
+          fontSize: 22,
           color: D.cream,
-          letterSpacing: 10,
+          letterSpacing: 6,
           lineHeight: 1,
         }}
       >
