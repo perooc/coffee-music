@@ -173,7 +173,11 @@ export default function AdminSalesPage() {
 
       {data && (
         <>
-          <SummaryCards summary={data.summary} />
+          <SalesKpiStrip
+            summary={data.summary}
+            previous={data.previous_period}
+            daily={data.daily_breakdown}
+          />
 
           <div
             style={{
@@ -627,74 +631,314 @@ function buildPresetRange(
   }
 }
 
-function SummaryCards({
+// ─── KPI strip ──────────────────────────────────────────────────────────────
+//
+// 4 KPIs operativos del bar. Cada card muestra:
+//   - Label (caption Manrope mono uppercase)
+//   - Valor grande Bebas, color por tono semántico
+//   - Delta vs período anterior (▲/▼ % con color verde/rojo)
+//   - Sparkline mini (SVG nativo) basado en daily_breakdown
+//
+// "Ticket promedio" no tiene sparkline porque es un derivado (revenue /
+// tickets) — graficar el cociente día a día introduce ruido en días con
+// pocos tickets. Lo dejamos solo con delta.
+//
+// Sticky top: al hacer scroll por los gráficos y listas de abajo, los
+// KPIs se quedan visibles arriba para no perder el contexto del período
+// que estás analizando.
+function SalesKpiStrip({
   summary,
+  previous,
+  daily,
 }: {
   summary: SalesInsightsResponse["summary"];
+  previous: SalesInsightsResponse["previous_period"];
+  daily: SalesInsightsResponse["daily_breakdown"];
 }) {
-  const cards: { label: string; value: string; color: string }[] = [
-    {
-      label: "Unidades vendidas",
-      value: String(summary.total_units),
-      color: C.olive,
-    },
-    {
-      label: "Ingresos",
-      value: fmt(summary.total_revenue),
-      color: C.gold,
-    },
-    {
-      label: "Productos vendidos",
-      value: String(summary.distinct_products_sold),
-      color: C.ink,
-    },
-  ];
   return (
     <div
       style={{
-        display: "grid",
-        gap: 12,
-        gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+        position: "sticky",
+        top: 0,
+        zIndex: 5,
         marginBottom: 16,
+        marginInline: "-24px",
+        paddingInline: 24,
+        paddingBlock: 12,
+        background: `linear-gradient(180deg, ${C.cream} 0%, color-mix(in srgb, ${C.cream} 92%, transparent) 100%)`,
+        backdropFilter: "blur(8px)",
+        WebkitBackdropFilter: "blur(8px)",
+        borderBottom: `1px solid ${C.sand}`,
       }}
     >
-      {cards.map((c) => (
-        <div
-          key={c.label}
-          style={{
-            background: C.paper,
-            border: `1px solid ${C.sand}`,
-            borderRadius: 12,
-            padding: "14px 16px",
-          }}
-        >
-          <div
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 9,
-              letterSpacing: 2,
-              color: C.mute,
-              textTransform: "uppercase",
-              fontWeight: 600,
-              marginBottom: 6,
-            }}
-          >
-            {c.label}
-          </div>
-          <div
-            style={{
-              fontFamily: FONT_DISPLAY,
-              fontSize: 26,
-              color: c.color,
-              letterSpacing: 0.5,
-            }}
-          >
-            {c.value}
-          </div>
-        </div>
-      ))}
+      <div
+        style={{
+          display: "grid",
+          gap: 10,
+          gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+        }}
+      >
+        <KpiCard
+          label="Ingresos"
+          value={fmt(summary.total_revenue)}
+          tone="warm"
+          previous={previous.total_revenue}
+          current={summary.total_revenue}
+          spark={daily.map((d) => d.revenue)}
+          formatPrev={fmt}
+        />
+        <KpiCard
+          label="Tickets"
+          value={String(summary.tickets_count)}
+          tone="success"
+          previous={previous.tickets_count}
+          current={summary.tickets_count}
+          spark={daily.map((d) => d.tickets)}
+        />
+        <KpiCard
+          label="Ticket promedio"
+          value={summary.tickets_count > 0 ? fmt(summary.avg_ticket) : "—"}
+          tone="neutral"
+          previous={previous.avg_ticket}
+          current={summary.avg_ticket}
+          formatPrev={fmt}
+        />
+        <KpiCard
+          label="Unidades"
+          value={String(summary.total_units)}
+          tone="neutral"
+          previous={previous.total_units}
+          current={summary.total_units}
+          spark={daily.map((d) => d.units)}
+        />
+      </div>
     </div>
   );
+}
+
+type KpiTone = "neutral" | "success" | "warm" | "alert";
+
+const TONE_COLOR: Record<KpiTone, string> = {
+  neutral: C.cacao,
+  success: C.olive,
+  warm: C.gold,
+  alert: C.terracotta,
+};
+
+function KpiCard({
+  label,
+  value,
+  tone,
+  current,
+  previous,
+  spark,
+  formatPrev,
+}: {
+  label: string;
+  value: string;
+  tone: KpiTone;
+  /** Valor numérico actual (para calcular delta vs anterior). */
+  current: number;
+  /** Valor numérico del período anterior. */
+  previous: number;
+  /** Serie de valores diarios para sparkline. Si null, no se dibuja. */
+  spark?: number[];
+  /** Cómo formatear el valor anterior en el tooltip — default: stringify. */
+  formatPrev?: (n: number) => string;
+}) {
+  const valueColor = TONE_COLOR[tone];
+  const delta = computeDelta(current, previous);
+  return (
+    <div
+      style={{
+        background: C.paper,
+        border: `1px solid ${C.sand}`,
+        borderRadius: 12,
+        padding: "12px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        boxShadow: C.shadow,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          letterSpacing: 2,
+          color: C.mute,
+          textTransform: "uppercase",
+          fontWeight: 700,
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <span
+          style={{
+            fontFamily: FONT_DISPLAY,
+            fontSize: 26,
+            color: valueColor,
+            letterSpacing: 0.5,
+            lineHeight: 1,
+          }}
+        >
+          {value}
+        </span>
+        <DeltaBadge
+          delta={delta}
+          title={
+            previous > 0
+              ? `Período anterior: ${formatPrev ? formatPrev(previous) : previous}`
+              : "Sin datos del período anterior"
+          }
+        />
+      </div>
+      {spark && spark.length > 1 && (
+        <Sparkline values={spark} color={valueColor} />
+      )}
+    </div>
+  );
+}
+
+function DeltaBadge({
+  delta,
+  title,
+}: {
+  delta: { pct: number; sign: 1 | -1 | 0; finite: boolean };
+  title?: string;
+}) {
+  if (!delta.finite) {
+    return (
+      <span
+        title={title}
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 10,
+          letterSpacing: 0.5,
+          color: C.mute,
+          fontWeight: 700,
+          padding: "2px 6px",
+          borderRadius: 999,
+          background: C.parchment,
+        }}
+      >
+        —
+      </span>
+    );
+  }
+  const isUp = delta.sign === 1;
+  const isFlat = delta.sign === 0;
+  const color = isFlat ? C.mute : isUp ? C.olive : C.terracotta;
+  const bg = isFlat
+    ? C.parchment
+    : isUp
+      ? `color-mix(in srgb, ${C.oliveSoft} 60%, ${C.paper})`
+      : `color-mix(in srgb, ${C.terracottaSoft} 60%, ${C.paper})`;
+  const arrow = isFlat ? "•" : isUp ? "▲" : "▼";
+  return (
+    <span
+      title={title}
+      style={{
+        fontFamily: FONT_MONO,
+        fontSize: 10,
+        letterSpacing: 0.5,
+        color,
+        fontWeight: 800,
+        padding: "2px 7px",
+        borderRadius: 999,
+        background: bg,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {arrow} {Math.abs(Math.round(delta.pct))}%
+    </span>
+  );
+}
+
+/**
+ * Sparkline SVG inline. Sin librería: para 7-30 puntos un SVG con un
+ * `<path>` y un `<polyline>` rellenado por debajo es suficiente, más
+ * customizable y ~50× más liviano que cargar recharts.
+ *
+ * Si todos los valores son cero la línea queda plana en el medio del
+ * box (mejor que cero al fondo, que se confunde con border-bottom).
+ */
+function Sparkline({
+  values,
+  color,
+}: {
+  values: number[];
+  color: string;
+}) {
+  const W = 100;
+  const H = 28;
+  const max = Math.max(...values, 0);
+  const min = 0;
+  const range = max - min || 1;
+  const stepX = values.length > 1 ? W / (values.length - 1) : 0;
+
+  const points = values.map((v, i) => {
+    const x = i * stepX;
+    // Si todo es 0, dejamos la línea en el medio (H/2) — visualmente
+    // significa "plano" sin colapsar contra el borde inferior.
+    const y =
+      max === 0
+        ? H / 2
+        : H - ((v - min) / range) * (H - 4) - 2;
+    return [x, y] as const;
+  });
+
+  const linePath = points
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${p[0].toFixed(2)} ${p[1].toFixed(2)}`)
+    .join(" ");
+  const areaPath =
+    `M 0 ${H} ` +
+    points.map((p) => `L ${p[0].toFixed(2)} ${p[1].toFixed(2)}`).join(" ") +
+    ` L ${W} ${H} Z`;
+
+  return (
+    <svg
+      role="img"
+      aria-label="Tendencia del período"
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="none"
+      style={{
+        width: "100%",
+        height: H,
+        display: "block",
+        overflow: "visible",
+      }}
+    >
+      <path d={areaPath} fill={color} fillOpacity={0.12} />
+      <path
+        d={linePath}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * % cambio vs período anterior. Si el anterior fue 0 y el actual no, no
+ * podemos sacar % (división por cero) — devolvemos `finite: false` y el
+ * badge muestra "—" en vez de "+∞%". Si ambos son 0 también es un caso
+ * sin información útil.
+ */
+function computeDelta(
+  current: number,
+  previous: number,
+): { pct: number; sign: 1 | -1 | 0; finite: boolean } {
+  if (previous === 0) {
+    return { pct: 0, sign: 0, finite: false };
+  }
+  const pct = ((current - previous) / previous) * 100;
+  const sign = pct > 0.5 ? 1 : pct < -0.5 ? -1 : 0;
+  return { pct, sign, finite: true };
 }
 
 function Panel({
