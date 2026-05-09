@@ -97,6 +97,27 @@ export class TableSessionsController {
   }
 
   /**
+   * Admin opens a session for a table or virtual bar. Used when a
+   * customer didn't (or can't) scan the QR — the staff starts the
+   * session from the dashboard and a `custom_name` (e.g. "Camilo")
+   * is attached so multiple parallel bar accounts can be told apart.
+   *
+   * Returns 200 even if a session was already open: idempotent join
+   * matches the customer flow. The optional `custom_name` only takes
+   * effect on a NEW session — we don't rename someone else's account.
+   */
+  @Post("admin/table-sessions/open")
+  @UseGuards(JwtGuard)
+  @AuthKinds("admin")
+  async openByAdmin(@Body() dto: OpenSessionDto & { custom_name?: string }) {
+    const session = await this.sessions.open(dto.table_id, {
+      customName: dto.custom_name?.trim() || null,
+      openedBy: "staff",
+    });
+    return this.sessions.serialize(session);
+  }
+
+  /**
    * Staff closes a session manually. Customer-driven close would need its
    * own flow; today `closing` status is the softer path for that.
    */

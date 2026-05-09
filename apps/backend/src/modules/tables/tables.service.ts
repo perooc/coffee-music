@@ -1,5 +1,10 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import { Prisma, Table } from "@prisma/client";
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import { Prisma, Table, TableKind } from "@prisma/client";
+import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../database/prisma.service";
 import { UpdateTableDto } from "./dto/update-table.dto";
 
@@ -114,6 +119,82 @@ export class TablesService {
     });
 
     return this.serializeTableList(table);
+  }
+
+  /**
+   * Create a virtual BAR account. The qr_code column is @unique and
+   * NOT NULL, so we generate a placeholder string for it — bars never
+   * surface a QR. The `number` we assign is the next free integer
+   * across both kinds; staff identify bars by `custom_name` on the
+   * session, not by number, so the value is mostly cosmetic.
+   */
+  async createBar(name: string) {
+    const trimmed = (name ?? "").trim();
+    if (!trimmed) {
+      throw new BadRequestException({
+        message: "El nombre de la barra es requerido",
+        code: "BAR_NAME_REQUIRED",
+      });
+    }
+    if (trimmed.length > 80) {
+      throw new BadRequestException({
+        message: "El nombre es demasiado largo (máx 80)",
+        code: "BAR_NAME_TOO_LONG",
+      });
+    }
+
+    // We could pre-allocate a "BAR-N" number range to keep them apart
+    // visually from physical tables, but front-end groups by `kind` so
+    // there's no collision risk in the UI. Simpler: take the next free.
+    const last = await this.prisma.table.findFirst({
+      orderBy: { number: "desc" },
+      select: { number: true },
+    });
+    const nextNumber = (last?.number ?? 0) + 1;
+
+    const created = await this.prisma.table.create({
+      data: {
+        number: nextNumber,
+        // Random placeholder to satisfy @unique. Never used for routing.
+        qr_code: `bar-${randomBytes(8).toString("hex")}`,
+        kind: TableKind.BAR,
+        // Bars start "available" same as tables. Status flips to
+        // occupied when a session opens; stays in sync via projection.
+      },
+      include: tableListInclude,
+    });
+
+    return this.serializeTableList(created);
+  }
+
+  /**
+   * Delete a BAR. Refused for TABLE rows — physical tables stay around
+   * because their QR is printed on the surface. A BAR with an active
+   * session is also refused; the staff must close the session first
+   * (loud failure beats silent data loss).
+   */
+  async deleteBar(id: number) {
+    const table = await this.prisma.table.findUnique({
+      where: { id },
+      select: { id: true, kind: true, current_session_id: true },
+    });
+    if (!table) {
+      throw new NotFoundException(`Table ${id} not found`);
+    }
+    if (table.kind !== TableKind.BAR) {
+      throw new BadRequestException({
+        message: "Solo se pueden eliminar barras virtuales",
+        code: "TABLE_NOT_DELETABLE",
+      });
+    }
+    if (table.current_session_id !== null) {
+      throw new BadRequestException({
+        message: "Cierra la cuenta antes de eliminar la barra",
+        code: "BAR_HAS_OPEN_SESSION",
+      });
+    }
+    await this.prisma.table.delete({ where: { id } });
+    return { ok: true };
   }
 
   private serializeTable(table: Table) {

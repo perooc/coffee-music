@@ -9,6 +9,7 @@ import {
 } from "@nestjs/common";
 import { ConsumptionsService, AuditActor } from "./consumptions.service";
 import { CreateAdjustmentDto } from "./dto/create-adjustment.dto";
+import { CreatePartialPaymentDto } from "./dto/create-partial-payment.dto";
 import { RefundConsumptionDto } from "./dto/refund-consumption.dto";
 import { JwtGuard } from "../auth/guards/jwt.guard";
 import { AuthKinds } from "../auth/guards/decorators";
@@ -43,6 +44,28 @@ export class ConsumptionsController {
     const created = await this.service.createAdjustment(
       sessionId,
       dto,
+      toActor(auth),
+    );
+    return this.service.serialize(created);
+  }
+
+  /**
+   * Admin records a partial cash payment. We expose this as a sibling
+   * of /adjustments rather than a sub-resource because the staff thinks
+   * of it as a separate concept ("cobré 50k al cliente"), not an
+   * "adjustment" in the discount/correction sense.
+   */
+  @Post("bill/:sessionId/partial-payment")
+  @UseGuards(JwtGuard)
+  @AuthKinds("admin")
+  async recordPartialPayment(
+    @Param("sessionId", ParseIntPipe) sessionId: number,
+    @Body() dto: CreatePartialPaymentDto,
+    @CurrentAuth() auth: AuthPayload,
+  ) {
+    const created = await this.service.recordPartialPayment(
+      sessionId,
+      dto.amount,
       toActor(auth),
     );
     return this.service.serialize(created);

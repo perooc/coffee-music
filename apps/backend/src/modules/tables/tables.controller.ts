@@ -1,14 +1,17 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseIntPipe,
   Patch,
+  Post,
   UseGuards,
 } from "@nestjs/common";
 import { TablesService } from "./tables.service";
 import { UpdateTableDto } from "./dto/update-table.dto";
+import { CreateBarDto } from "./dto/create-bar.dto";
 import { JwtGuard } from "../auth/guards/jwt.guard";
 import { AuthKinds } from "../auth/guards/decorators";
 
@@ -44,5 +47,15 @@ export class TablesController {
     @Body() updateTableDto: UpdateTableDto,
   ) {
     return this.tablesService.updateStatus(id, updateTableDto);
+  }
+
+  @Post("bars")
+  createBar(@Body() dto: CreateBarDto) {
+    return this.tablesService.createBar(dto.name);
+  }
+
+  @Delete("bars/:id")
+  deleteBar(@Param("id", ParseIntPipe) id: number) {
+    return this.tablesService.deleteBar(id);
   }
 }

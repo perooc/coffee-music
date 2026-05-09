@@ -52,6 +52,18 @@ enum ConsumptionType {
   adjustment
   discount
   refund
+  // Cash collected mid-session. Stored as a negative amount so the
+  // bill total naturally turns into "pending after partial payments"
+  // without changing the sum-of-items logic. Real revenue accounting
+  // happens upstream — this row is the customer-facing receipt entry.
+  partial_payment
+}
+
+enum TableKind {
+  // Real physical table with a QR code on the surface.
+  TABLE
+  // Bar-counter / standing-only account opened from the admin. No QR.
+  BAR
 }
 
 enum PlaybackStatus {
@@ -100,6 +112,10 @@ model Table {
   id                     Int            @id @default(autoincrement())
   number                 Int            @unique
   qr_code                String         @unique
+  // TABLE = physical table with a QR. BAR = virtual account opened
+  // from the admin (bar-counter / standing customer). Bars don't have
+  // a usable QR — qr_code stays @unique so we still store a placeholder.
+  kind                   TableKind      @default(TABLE)
   status                 TableStatus    @default(available)
   current_session_id     Int?           @unique
   total_consumption      Decimal        @default(0) @db.Decimal(10, 2)
@@ -112,6 +128,8 @@ model Table {
   queue_items            QueueItem[]
   sessions               TableSession[] @relation("TableSessions")
   current_session        TableSession?  @relation("TableCurrentSession", fields: [current_session_id], references: [id], onDelete: SetNull)
+
+  @@index([kind])
 }
 
 model TableSession {
@@ -122,6 +140,15 @@ model TableSession {
   last_consumption_at DateTime?
   opened_at           DateTime           @default(now())
   closed_at           DateTime?
+  // Free-form label set by staff at open time (e.g. "Camilo", "Mesa de
+  // pie"). Optional for TABLE sessions, expected for BAR sessions so
+  // the staff can tell parallel accounts apart in the admin grid.
+  custom_name         String?
+  // Who initiated the session: a customer scanning the QR ("customer")
+  // vs a staff member opening it from the admin ("staff"). Stored as a
+  // string instead of an enum so future origins (kiosk, integration,
+  // etc.) don't require a migration.
+  opened_by           String             @default("customer")
   // Customer-driven flag: "I want the bill". When set, no new
   // OrderRequest can be created for this session until cleared. The session
   // stays `open` and the music/fairness signals are unaffected.

@@ -40,7 +40,10 @@ export class TableSessionsService {
     private readonly realtime: RealtimeGateway,
   ) {}
 
-  async open(tableId: number): Promise<TableSession> {
+  async open(
+    tableId: number,
+    options: { customName?: string | null; openedBy?: "customer" | "staff" } = {},
+  ): Promise<TableSession> {
     const table = await this.prisma.table.findUnique({ where: { id: tableId } });
     if (!table) {
       throw new NotFoundException(`Table ${tableId} not found`);
@@ -61,7 +64,10 @@ export class TableSessionsService {
         );
         return { session: existing, isNew: false };
       }
-      const created = await this.createAndProject(tableId, tx);
+      const created = await this.createAndProject(tableId, tx, {
+        customName: options.customName ?? null,
+        openedBy: options.openedBy ?? "customer",
+      });
       return { session: created, isNew: true };
     });
 
@@ -83,9 +89,18 @@ export class TableSessionsService {
   private async createAndProject(
     tableId: number,
     tx: Tx,
+    options: { customName: string | null; openedBy: "customer" | "staff" } = {
+      customName: null,
+      openedBy: "customer",
+    },
   ): Promise<TableSession> {
     const session = await tx.tableSession.create({
-      data: { table_id: tableId, status: TableSessionStatus.open },
+      data: {
+        table_id: tableId,
+        status: TableSessionStatus.open,
+        custom_name: options.customName,
+        opened_by: options.openedBy,
+      },
     });
     await this.projection.onSessionOpened(tableId, session.id, tx);
     return session;

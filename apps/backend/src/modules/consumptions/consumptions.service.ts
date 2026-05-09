@@ -42,6 +42,10 @@ export type BillSummary = {
   subtotal: number;
   discounts_total: number;
   adjustments_total: number;
+  // Sum of negative `partial_payment` rows. Stored as a negative
+  // number so the UI can show "Pagado parcial: -$50.000" without
+  // needing to invert the sign on read.
+  partial_payments_total: number;
   total: number;
   item_count: number;
 };
@@ -179,6 +183,103 @@ export class ConsumptionsService {
     return result;
   }
 
+  /**
+   * Customer pays part of the bill mid-session. Stored as a Consumption
+   * with negative amount and type = partial_payment, so:
+   *   - the bill's running total naturally drops by `amount` (= remaining
+   *     to pay) without changing the sum-of-items reducer above;
+   *   - the customer-facing receipt lists "Pago parcial — $X" as a line
+   *     item, in chronological position;
+   *   - real revenue accounting upstream still treats every partial as
+   *     revenue at the moment it lands (the `amount` is mirrored into
+   *     reports the same way other consumption rows are).
+   *
+   * Refused on closed sessions: a closed session is meant to be
+   * append-only history. Use refundConsumption to undo a wrong partial.
+   */
+  async recordPartialPayment(
+    sessionId: number,
+    rawAmount: number,
+    actor: AuditActor = null,
+  ): Promise<ConsumptionFull> {
+    const amount = Number(rawAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException({
+        message: "El monto del pago parcial debe ser positivo",
+        code: "PARTIAL_PAYMENT_INVALID_AMOUNT",
+      });
+    }
+
+    const session = await this.prisma.tableSession.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session) {
+      throw new NotFoundException(`TableSession ${sessionId} not found`);
+    }
+    if (session.status === TableSessionStatus.closed) {
+      throw new BadRequestException({
+        message: "Session is closed; partial payments are not allowed",
+        code: "TABLE_SESSION_CLOSED",
+      });
+    }
+
+    // Stored as negative so the existing sum reducer turns "total
+    // consumption" into "remaining to pay" without special-casing.
+    const negative = -this.round(amount);
+
+    const description = `Pago parcial — ${this.formatCurrency(amount)}`;
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.consumption.create({
+        data: {
+          table_session_id: sessionId,
+          description,
+          quantity: 1,
+          unit_amount: negative,
+          amount: negative,
+          type: ConsumptionType.partial_payment,
+          // No reason/notes: the description is the receipt's voice;
+          // upstream audit log already records actor + timestamp.
+          created_by: actor?.name ?? null,
+        },
+        include: CONSUMPTION_INCLUDE,
+      });
+      await tx.tableSession.update({
+        where: { id: sessionId },
+        data: {
+          total_consumption: { increment: negative },
+          last_consumption_at: new Date(),
+        },
+      });
+      // The pending pesos drop by `amount`. Treat it as a reversal in
+      // the projection so "total_consumption" on the table tile mirrors
+      // what the customer sees.
+      await this.projection.onConsumptionReversed(
+        session.table_id,
+        new Prisma.Decimal(amount),
+        tx,
+      );
+      return created;
+    });
+
+    this.emitBillUpdates(sessionId, session.table_id);
+    return result;
+  }
+
+  private formatCurrency(n: number): string {
+    // Receipt label only — the bill UI re-formats with locale rules.
+    // We just want a sane "$123.456" in the description column.
+    try {
+      return new Intl.NumberFormat("es-CO", {
+        style: "currency",
+        currency: "COP",
+        maximumFractionDigits: 0,
+      }).format(n);
+    } catch {
+      return `$${n}`;
+    }
+  }
+
   async refundConsumption(
     consumptionId: number,
     dto: RefundConsumptionDto,
@@ -280,6 +381,7 @@ export class ConsumptionsService {
     let subtotal = 0;
     let discounts = 0;
     let adjustments = 0;
+    let partials = 0;
     for (const item of items) {
       const n = Number(item.amount);
       switch (item.type) {
@@ -293,13 +395,17 @@ export class ConsumptionsService {
         case ConsumptionType.refund:
           adjustments += n;
           break;
+        case ConsumptionType.partial_payment:
+          partials += n;
+          break;
       }
     }
     return {
       subtotal: this.round(subtotal),
       discounts_total: this.round(discounts),
       adjustments_total: this.round(adjustments),
-      total: this.round(subtotal + discounts + adjustments),
+      partial_payments_total: this.round(partials),
+      total: this.round(subtotal + discounts + adjustments + partials),
       item_count: items.length,
     };
   }

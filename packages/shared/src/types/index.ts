@@ -15,7 +15,14 @@ export type OrderStatus =
   | "delivered"
   | "cancelled";
 
-export type ConsumptionType = "product" | "adjustment" | "discount" | "refund";
+export type ConsumptionType =
+  | "product"
+  | "adjustment"
+  | "discount"
+  | "refund"
+  | "partial_payment";
+
+export type TableKind = "TABLE" | "BAR";
 
 export type QueueStatus = "pending" | "playing" | "played" | "skipped";
 
@@ -30,6 +37,7 @@ export interface Table {
   id: number;
   number: number;
   qr_code: string;
+  kind: TableKind;
   status: TableStatus;
   current_session_id: number | null;
   total_consumption: number;
@@ -85,6 +93,18 @@ export interface TableSession {
    * until the admin closes the session.
    */
   paid_at: string | null;
+  /**
+   * Free-form label set when staff opens the session from the admin
+   * dashboard (typically the customer's first name). Null for sessions
+   * opened by a customer scanning the QR.
+   */
+  custom_name: string | null;
+  /**
+   * Origin of the session. "customer" = QR scan + Iniciar mesa.
+   * "staff" = admin opens it on behalf of the customer (bar account or
+   * a regular table where the customer didn't scan).
+   */
+  opened_by: string;
   metadata: unknown | null;
   created_at: string;
   updated_at: string;
@@ -254,6 +274,8 @@ export interface BillSummary {
   subtotal: number;
   discounts_total: number;
   adjustments_total: number;
+  // Sum of `partial_payment` entries — already negative.
+  partial_payments_total: number;
   total: number;
   item_count: number;
 }
