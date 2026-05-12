@@ -403,6 +403,7 @@ function EditMode({
   const [description, setDescription] = useState(product.description ?? "");
   const [price, setPrice] = useState(String(product.price));
   const [category, setCategory] = useState(product.category ?? "");
+  const [stock, setStock] = useState(String(product.stock));
   const [threshold, setThreshold] = useState(
     String(product.low_stock_threshold ?? "0"),
   );
@@ -422,6 +423,22 @@ function EditMode({
         category: category.trim(),
         low_stock_threshold: Number(threshold) || 0,
       });
+      // Stock can't ride through /admin/products/:id update — that
+      // route refuses it to keep audit trail clean. If the value
+      // changed, post an InventoryMovement with the signed delta and
+      // an auto reason so the audit log shows "edición directa".
+      const targetStock = Math.round(Number(stock));
+      if (
+        Number.isFinite(targetStock) &&
+        targetStock !== product.stock
+      ) {
+        const delta = targetStock - product.stock;
+        await inventoryMovementsApi.record(product.id, {
+          type: "adjustment",
+          quantity: delta,
+          reason: `Stock establecido por edición directa: ${product.stock} → ${targetStock}`,
+        });
+      }
       onSaved();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -481,6 +498,17 @@ function EditMode({
             style={inputStyle}
           />
         </Field>
+        <Field label="Stock">
+          <input
+            type="number"
+            required
+            min={0}
+            step={1}
+            value={stock}
+            onChange={(e) => setStock(e.target.value)}
+            style={inputStyle}
+          />
+        </Field>
         <Field label="Umbral bajo stock (0 = sin alerta)">
           <input
             type="number"
@@ -515,13 +543,9 @@ function EditMode({
 // administrativos de pérdidas reales (con varios operarios), reactivar
 // "correction" aquí basta.
 type VisibleMovementType = Exclude<InventoryMovementType, "correction">;
-// UI-only extension: "set" is rendered as a fourth mode in the picker
-// but maps onto the backend's `adjustment` type with a calculated delta.
-// We never send "set" to the server.
-type StockUiKind = VisibleMovementType | "set";
 
 const TYPE_LABELS: Record<
-  StockUiKind,
+  VisibleMovementType,
   { title: string; helper: string; sign: 1 | -1 | 0 }
 > = {
   restock: { title: "Reponer", helper: "Unidades a sumar", sign: 1 },
@@ -529,13 +553,6 @@ const TYPE_LABELS: Record<
   adjustment: {
     title: "Ajuste",
     helper: "Delta firmado (+ suma / − resta)",
-    sign: 0,
-  },
-  set: {
-    title: "Establecer",
-    // Helper text shown above the input. For "set" the input is an
-    // absolute target stock, not a delta.
-    helper: "Nuevo stock (cantidad total)",
     sign: 0,
   },
 };
@@ -549,59 +566,38 @@ function StockMode({
   onCancel: () => void;
   onSaved: () => void;
 }) {
-  const [type, setType] = useState<StockUiKind>("restock");
+  const [type, setType] = useState<VisibleMovementType>("restock");
   const [amount, setAmount] = useState("1");
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // "Set" routes through a confirm modal — direct stock edits are
-  // rarer and easier to fat-finger than deltas, so we make the
-  // operator say it twice.
-  const [confirmingSet, setConfirmingSet] = useState(false);
 
   const meta = TYPE_LABELS[type];
 
   function computeQuantity(): number {
     const n = Number(amount);
     if (!Number.isFinite(n)) return NaN;
-    if (type === "set") {
-      // "Set" is the only kind whose input is an absolute target. The
-      // delta the backend expects is (target - current).
-      return Math.round(n) - product.stock;
-    }
     if (meta.sign === 1) return Math.abs(n);
     if (meta.sign === -1) return -Math.abs(n);
     return n;
   }
 
-  async function performSubmit() {
+  async function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (submitting) return;
     const q = computeQuantity();
     if (!Number.isFinite(q) || q === 0) {
-      setError(
-        type === "set"
-          ? "El nuevo stock debe ser distinto del actual."
-          : "La cantidad debe ser distinta de cero.",
-      );
+      setError("La cantidad debe ser distinta de cero.");
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      // "Set" submits as an adjustment with an auto-generated reason so
-      // the audit log says "Stock establecido por edición directa: 5 → 8"
-      // every time, without the operator having to type anything. The
-      // backend type is `adjustment` because the delta is signed.
-      const isSet = type === "set";
-      const targetType: InventoryMovementType = isSet ? "adjustment" : type;
-      const target = Math.round(Number(amount));
-      const autoReason = isSet
-        ? `Stock establecido por edición directa: ${product.stock} → ${target}`
-        : reason.trim();
       await inventoryMovementsApi.record(product.id, {
-        type: targetType,
+        type,
         quantity: q,
-        reason: autoReason,
+        reason: reason.trim(),
         notes: notes.trim() || undefined,
       });
       onSaved();
@@ -619,26 +615,7 @@ function StockMode({
       }
     } finally {
       setSubmitting(false);
-      setConfirmingSet(false);
     }
-  }
-
-  async function submit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (submitting) return;
-    if (type === "set") {
-      // Validate locally first so the confirm modal only opens if the
-      // input is meaningful. Otherwise show error and stay.
-      const q = computeQuantity();
-      if (!Number.isFinite(q) || q === 0) {
-        setError("El nuevo stock debe ser distinto del actual.");
-        return;
-      }
-      setError(null);
-      setConfirmingSet(true);
-      return;
-    }
-    await performSubmit();
   }
 
   const delta = computeQuantity();
@@ -676,14 +653,8 @@ function StockMode({
         </div>
 
         <Field label="Tipo">
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(2, 1fr)",
-              gap: 6,
-            }}
-          >
-            {(["restock", "waste", "adjustment", "set"] as const).map((t) => {
+          <div style={{ display: "flex", gap: 6 }}>
+            {(["restock", "waste", "adjustment"] as const).map((t) => {
               const active = type === t;
               return (
                 <button
@@ -691,6 +662,7 @@ function StockMode({
                   type="button"
                   onClick={() => setType(t)}
                   style={{
+                    flex: 1,
                     padding: "8px 10px",
                     border: `1px solid ${active ? C.ink : C.sand}`,
                     background: active ? C.ink : C.paper,
@@ -718,7 +690,6 @@ function StockMode({
             type="number"
             required
             step={1}
-            min={type === "set" ? 0 : undefined}
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             style={inputStyle}
@@ -732,83 +703,31 @@ function StockMode({
               letterSpacing: 1,
             }}
           >
-            {type === "set" ? (
-              <>
-                Resultado:{" "}
-                <strong style={{ color: C.ink, fontWeight: 800 }}>
-                  {product.stock}
-                </strong>{" "}
-                →{" "}
-                <strong
-                  style={{
-                    color:
-                      delta > 0 ? C.olive : delta < 0 ? C.terracotta : C.ink,
-                    fontWeight: 800,
-                  }}
-                >
-                  {Number.isFinite(Number(amount))
-                    ? Math.round(Number(amount))
-                    : product.stock}
-                </strong>{" "}
-                <span style={{ color: C.mute }}>
-                  ({delta > 0 ? "+" : ""}
-                  {Number.isFinite(delta) ? delta : 0})
-                </span>
-              </>
-            ) : (
-              <>
-                Delta a aplicar:{" "}
-                <strong
-                  style={{
-                    color:
-                      delta > 0 ? C.olive : delta < 0 ? C.terracotta : C.ink,
-                    fontWeight: 800,
-                  }}
-                >
-                  {delta > 0 ? "+" : ""}
-                  {Number.isFinite(delta) ? delta : 0}
-                </strong>
-              </>
-            )}
+            Delta a aplicar:{" "}
+            <strong
+              style={{
+                color: delta > 0 ? C.olive : delta < 0 ? C.terracotta : C.ink,
+                fontWeight: 800,
+              }}
+            >
+              {delta > 0 ? "+" : ""}
+              {Number.isFinite(delta) ? delta : 0}
+            </strong>
           </div>
         </Field>
 
-        {type !== "set" && (
-          <Field label="Razón (obligatoria)">
-            <input
-              type="text"
-              required
-              minLength={3}
-              maxLength={200}
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Ej: entrega proveedor, botellas rotas..."
-              style={inputStyle}
-            />
-          </Field>
-        )}
-
-        {type === "set" && (
-          <div
-            style={{
-              padding: "10px 12px",
-              border: `1px dashed ${C.sand}`,
-              borderRadius: 10,
-              background: C.parchment ?? C.cream,
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              letterSpacing: 1,
-              color: C.mute,
-              lineHeight: 1.5,
-            }}
-          >
-            Se registrará en auditoría como{" "}
-            <strong style={{ color: C.ink }}>
-              &quot;Stock establecido por edición directa&quot;
-            </strong>{" "}
-            con el cambio de valores.
-          </div>
-        )}
+        <Field label="Razón (obligatoria)">
+          <input
+            type="text"
+            required
+            minLength={3}
+            maxLength={200}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Ej: entrega proveedor, botellas rotas..."
+            style={inputStyle}
+          />
+        </Field>
 
         <Field label="Notas (opcional)">
           <textarea
@@ -823,181 +742,7 @@ function StockMode({
         {error && <ErrorBanner text={error} />}
         <PanelActions onCancel={onCancel} submitting={submitting} />
       </form>
-
-      {confirmingSet && (
-        <SetStockConfirmModal
-          productName={product.name}
-          fromStock={product.stock}
-          toStock={Math.round(Number(amount))}
-          submitting={submitting}
-          onCancel={() => setConfirmingSet(false)}
-          onConfirm={performSubmit}
-        />
-      )}
     </>
-  );
-}
-
-function SetStockConfirmModal({
-  productName,
-  fromStock,
-  toStock,
-  submitting,
-  onCancel,
-  onConfirm,
-}: {
-  productName: string;
-  fromStock: number;
-  toStock: number;
-  submitting: boolean;
-  onCancel: () => void;
-  onConfirm: () => void | Promise<void>;
-}) {
-  const delta = toStock - fromStock;
-  return (
-    <div
-      role="dialog"
-      aria-modal
-      aria-label="Confirmar nuevo stock"
-      onClick={onCancel}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(43,29,20,0.45)",
-        zIndex: 1000,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-        backdropFilter: "blur(2px)",
-        WebkitBackdropFilter: "blur(2px)",
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "100%",
-          maxWidth: 380,
-          background: C.paper,
-          border: `1px solid ${C.sand}`,
-          borderRadius: 16,
-          padding: 22,
-          boxShadow: "0 30px 80px -20px rgba(43,29,20,0.45)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 14,
-          fontFamily: FONT_UI,
-        }}
-      >
-        <div>
-          <span
-            style={{
-              fontFamily: FONT_MONO,
-              fontSize: 10,
-              letterSpacing: 3,
-              color: C.gold,
-              textTransform: "uppercase",
-              fontWeight: 700,
-            }}
-          >
-            — Establecer stock
-          </span>
-          <h3
-            style={{
-              fontFamily: FONT_DISPLAY,
-              fontSize: 22,
-              letterSpacing: 0.5,
-              color: C.ink,
-              margin: "2px 0 0",
-              lineHeight: 1.15,
-            }}
-          >
-            ¿Aplicar el nuevo stock?
-          </h3>
-        </div>
-        <p
-          style={{
-            margin: 0,
-            fontFamily: FONT_UI,
-            fontSize: 13,
-            color: C.cacao,
-            lineHeight: 1.5,
-          }}
-        >
-          <strong>{productName}</strong>: pasará de{" "}
-          <strong>{fromStock}</strong> a <strong>{toStock}</strong>{" "}
-          unidades ({delta > 0 ? "+" : ""}
-          {delta}).
-        </p>
-        <p
-          style={{
-            margin: 0,
-            fontFamily: FONT_MONO,
-            fontSize: 10,
-            letterSpacing: 1,
-            color: C.mute,
-            lineHeight: 1.5,
-          }}
-        >
-          Quedará registrado en auditoría como{" "}
-          <strong style={{ color: C.ink }}>
-            edición directa de stock
-          </strong>
-          .
-        </p>
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            justifyContent: "flex-end",
-            marginTop: 4,
-          }}
-        >
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={submitting}
-            style={{
-              padding: "8px 14px",
-              fontSize: 11,
-              letterSpacing: 1.2,
-              textTransform: "uppercase",
-              fontFamily: FONT_MONO,
-              fontWeight: 700,
-              color: C.cacao,
-              background: "transparent",
-              border: `1px solid ${C.sand}`,
-              borderRadius: 999,
-              cursor: submitting ? "not-allowed" : "pointer",
-            }}
-          >
-            Cancelar
-          </button>
-          <button
-            type="button"
-            onClick={() => void onConfirm()}
-            disabled={submitting}
-            style={{
-              padding: "8px 16px",
-              fontSize: 11,
-              letterSpacing: 1.5,
-              textTransform: "uppercase",
-              fontFamily: FONT_DISPLAY,
-              fontWeight: 700,
-              color: C.paper,
-              background: submitting
-                ? C.sand
-                : `linear-gradient(135deg, ${C.gold} 0%, #C9944F 100%)`,
-              border: "none",
-              borderRadius: 999,
-              cursor: submitting ? "not-allowed" : "pointer",
-            }}
-          >
-            {submitting ? "Aplicando..." : "Sí, establecer"}
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 
