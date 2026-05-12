@@ -7,6 +7,7 @@ import { EmailService } from "./email.service";
 import { JwtGuard } from "./guards/jwt.guard";
 import { RolesGuard } from "./guards/roles.guard";
 import { SessionAccessGuard } from "./guards/session-access.guard";
+import { AuditLogModule } from "../audit-log/audit-log.module";
 
 @Global()
 @Module({
@@ -15,6 +16,7 @@ import { SessionAccessGuard } from "./guards/session-access.guard";
       secret: process.env.JWT_SECRET ?? "unsafe-dev-secret",
       // Per-token expiry is set at sign time in TokenService.
     }),
+    AuditLogModule,
   ],
   controllers: [AuthController],
   providers: [

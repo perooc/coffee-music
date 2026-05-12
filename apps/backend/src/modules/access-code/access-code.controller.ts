@@ -11,6 +11,7 @@ import { JwtGuard } from "../auth/guards/jwt.guard";
 import { AuthKinds } from "../auth/guards/decorators";
 import { CurrentAuth } from "../auth/guards/current-auth.decorator";
 import type { AuthPayload } from "../auth/types";
+import { AuditLogService } from "../audit-log/audit-log.service";
 
 /**
  * Two surfaces:
@@ -22,7 +23,10 @@ import type { AuthPayload } from "../auth/types";
  */
 @Controller("access-code")
 export class AccessCodeController {
-  constructor(private readonly service: AccessCodeService) {}
+  constructor(
+    private readonly service: AccessCodeService,
+    private readonly audit: AuditLogService,
+  ) {}
 
   /**
    * Public. Returns whether the supplied 4-digit code matches today's
@@ -73,6 +77,15 @@ export class AccessCodeController {
   async rotate(@CurrentAuth() auth: AuthPayload) {
     const actor =
       auth.kind === "admin" ? `admin#${auth.sub}` : auth.kind;
-    return this.service.rotate(actor);
+    const result = await this.service.rotate(actor);
+    if (auth.kind === "admin") {
+      void this.audit.record({
+        kind: "access_code_rotated",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        new_code: result.code,
+      });
+    }
+    return result;
   }
 }

@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { PrismaService } from "../../database/prisma.service";
 import { TokenService } from "./token.service";
 import { EmailService } from "./email.service";
+import { AuditLogService } from "../audit-log/audit-log.service";
 
 /**
  * Auth lifecycle for the admin panel:
@@ -32,6 +33,7 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly tokens: TokenService,
     private readonly email: EmailService,
+    private readonly audit: AuditLogService,
   ) {}
 
   async login(email: string, password: string, ip: string | null = null) {
@@ -83,6 +85,13 @@ export class AuthService {
       role: user.role,
     });
 
+    void this.audit.record({
+      kind: "login_success",
+      actor_id: user.id,
+      actor_label: user.name,
+      ip,
+    });
+
     return {
       token,
       user: this.serialize(user),
@@ -105,7 +114,7 @@ export class AuthService {
    * when the email isn't registered — that prevents the endpoint from
    * being used to enumerate which addresses are admins.
    */
-  async requestPasswordReset(email: string) {
+  async requestPasswordReset(email: string, ip: string | null = null) {
     const normalized = email.toLowerCase().trim();
     const user = await this.prisma.user.findUnique({
       where: { email: normalized },
@@ -130,6 +139,12 @@ export class AuthService {
         .sendPasswordReset(normalized, user.name, url)
         .catch((err) => this.logger.error(`reset email failed: ${err}`));
     }
+    void this.audit.record({
+      kind: "password_reset_requested",
+      attempted_email: normalized,
+      user_existed: Boolean(user && user.is_active),
+      ip,
+    });
     // Don't leak whether the user exists.
     return { ok: true };
   }
@@ -184,6 +199,11 @@ export class AuthService {
         last_failed_at: null,
       },
     });
+    void this.audit.record({
+      kind: "password_reset_completed",
+      actor_id: user.id,
+      actor_label: user.name,
+    });
     return { ok: true };
   }
 
@@ -220,6 +240,20 @@ export class AuthService {
           ip,
         })
         .catch((err) => this.logger.error(`alert email failed: ${err}`));
+      void this.audit.record({
+        kind: "login_locked",
+        attempted_email: email,
+        ip,
+        consecutive_failures: nextCount,
+        lockout_minutes: LOGIN_LOCKOUT_MINUTES,
+      });
+    } else {
+      void this.audit.record({
+        kind: "login_failed",
+        attempted_email: email,
+        ip,
+        consecutive_failures: nextCount,
+      });
     }
   }
 

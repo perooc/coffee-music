@@ -104,6 +104,41 @@ enum InventoryMovementType {
   correction
 }
 
+/**
+ * Tipos de eventos auditables. Un valor por cada acción sensible que el
+ * staff puede hacer. El enum es la lista cerrada — agregar uno requiere
+ * migration, lo cual es lo correcto: forzamos a pensar cada vez que se
+ * suma un evento nuevo, en lugar de un string libre que termina lleno
+ * de inconsistencias.
+ */
+enum AuditEventKind {
+  // Auth — actor anónimo / cuenta atacada
+  login_success
+  login_failed
+  login_locked
+  password_reset_requested
+  password_reset_completed
+  // Bar access code
+  access_code_rotated
+  // Sesiones de mesa / cuenta
+  session_opened_by_admin
+  session_marked_paid
+  session_closed
+  session_voided
+  session_partial_payment
+  // Cuentas sin mesa (BAR virtual)
+  walkin_account_opened
+  // Productos
+  product_created
+  product_updated
+  product_activated
+  product_deactivated
+  // Inventario directo (stock)
+  inventory_movement
+  // Ajustes de cuenta (cargo/descuento/refund)
+  bill_adjustment
+}
+
 model User {
   id            Int      @id @default(autoincrement())
   name          String
@@ -452,4 +487,36 @@ model PlaybackState {
   created_at       DateTime       @default(now())
   updated_at       DateTime       @updatedAt
   queue_item       QueueItem?     @relation(fields: [queue_item_id], references: [id], onDelete: SetNull)
+}
+
+/**
+ * Auditoría centralizada. Una fila por acción sensible. Append-only:
+ * el servicio solo expone `create` y `list`; no hay update/delete.
+ *
+ * - `actor_id` referencia User cuando hay sesión admin detrás. Null en
+ *   eventos anónimos (login fallido sin user válido, rotación system,
+ *   sesión cerrada por proceso automático, etc.).
+ * - `actor_label` es el snapshot del nombre/email del actor en el momento
+ *   del evento. Lo guardamos para que si después borramos el User la
+ *   auditoría no quede sin contexto.
+ * - `summary` es la línea humana lista para mostrar en UI.
+ * - `metadata` lleva JSON con el contexto adicional (session_id,
+ *   product_id, monto, ip, razón, etc.). El servicio decide qué claves
+ *   usar según `kind`.
+ *
+ * IP solo se guarda para eventos de auth — los demás no se benefician.
+ */
+model AuditLog {
+  id          Int            @id @default(autoincrement())
+  kind        AuditEventKind
+  actor_id    Int?
+  actor_label String?
+  summary     String
+  metadata    Json?
+  ip          String?
+  created_at  DateTime       @default(now())
+
+  @@index([created_at])
+  @@index([kind, created_at])
+  @@index([actor_id, created_at])
 }

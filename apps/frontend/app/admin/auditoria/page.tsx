@@ -33,7 +33,6 @@ export default function AuditLogPage() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [kindFilter, setKindFilter] = useState<AuditEventKind | "all">("all");
 
   useEffect(() => {
     let cancelled = false;
@@ -58,23 +57,74 @@ export default function AuditLogPage() {
     };
   }, []);
 
+  // We group kinds into UI buckets ("auth", "sessions", "products",
+  // "inventory") to keep the filter bar manageable. The "all" bucket
+  // shows everything, and each per-bucket filter resolves to a set of
+  // backend kinds.
+  type FilterKey =
+    | "all"
+    | "auth"
+    | "sessions"
+    | "products"
+    | "inventory"
+    | "access_code";
+
+  const FILTER_KINDS: Record<FilterKey, AuditEventKind[] | "all"> = {
+    all: "all",
+    auth: [
+      "login_success",
+      "login_failed",
+      "login_locked",
+      "password_reset_requested",
+      "password_reset_completed",
+    ],
+    sessions: [
+      "session_opened_by_admin",
+      "walkin_account_opened",
+      "session_marked_paid",
+      "session_closed",
+      "session_voided",
+      "session_partial_payment",
+      "bill_adjustment",
+    ],
+    products: [
+      "product_created",
+      "product_updated",
+      "product_activated",
+      "product_deactivated",
+    ],
+    inventory: ["inventory_movement"],
+    access_code: ["access_code_rotated"],
+  };
+
   const counts = useMemo(() => {
-    const c: Record<AuditEventKind | "all", number> = {
+    const c = {
       all: events.length,
-      bill_adjustment: 0,
-      refund: 0,
-      inventory_restock: 0,
-      inventory_waste: 0,
-      inventory_adjust: 0,
-    };
-    for (const e of events) c[e.kind] += 1;
+      auth: 0,
+      sessions: 0,
+      products: 0,
+      inventory: 0,
+      access_code: 0,
+    } as Record<FilterKey, number>;
+    for (const e of events) {
+      for (const key of Object.keys(FILTER_KINDS) as FilterKey[]) {
+        if (key === "all") continue;
+        const set = FILTER_KINDS[key];
+        if (Array.isArray(set) && set.includes(e.kind)) c[key] += 1;
+      }
+    }
     return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events]);
 
+  const [filterKey, setFilterKey] = useState<FilterKey>("all");
+
   const visible = useMemo(() => {
-    if (kindFilter === "all") return events;
-    return events.filter((e) => e.kind === kindFilter);
-  }, [events, kindFilter]);
+    const set = FILTER_KINDS[filterKey];
+    if (set === "all") return events;
+    return events.filter((e) => set.includes(e.kind));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, filterKey]);
 
   return (
     <>
@@ -153,8 +203,8 @@ export default function AuditLogPage() {
 
         <FilterBar
           counts={counts}
-          active={kindFilter}
-          onChange={setKindFilter}
+          active={filterKey}
+          onChange={setFilterKey}
         />
 
         {loading && events.length === 0 && (
@@ -167,7 +217,7 @@ export default function AuditLogPage() {
 
         {!loading && !error && visible.length === 0 && (
           <p style={emptyStateStyle}>
-            {kindFilter === "all"
+            {filterKey === "all"
               ? "Aún no hay movimientos registrados."
               : "Ningún movimiento de este tipo todavía."}
           </p>
@@ -196,22 +246,30 @@ export default function AuditLogPage() {
 
 // ─── Filter chips ────────────────────────────────────────────────────────────
 
+type FilterKey =
+  | "all"
+  | "auth"
+  | "sessions"
+  | "products"
+  | "inventory"
+  | "access_code";
+
 function FilterBar({
   counts,
   active,
   onChange,
 }: {
-  counts: Record<AuditEventKind | "all", number>;
-  active: AuditEventKind | "all";
-  onChange: (k: AuditEventKind | "all") => void;
+  counts: Record<FilterKey, number>;
+  active: FilterKey;
+  onChange: (k: FilterKey) => void;
 }) {
-  const filters: { key: AuditEventKind | "all"; label: string }[] = [
+  const filters: { key: FilterKey; label: string }[] = [
     { key: "all", label: "Todos" },
-    { key: "bill_adjustment", label: "Ajustes / Descuentos" },
-    { key: "refund", label: "Reembolsos" },
-    { key: "inventory_restock", label: "Reposición" },
-    { key: "inventory_waste", label: "Mermas" },
-    { key: "inventory_adjust", label: "Correcciones stock" },
+    { key: "auth", label: "Sesión / Auth" },
+    { key: "sessions", label: "Cuentas / Mesas" },
+    { key: "products", label: "Productos" },
+    { key: "inventory", label: "Inventario" },
+    { key: "access_code", label: "Código del bar" },
   ];
 
   return (
@@ -273,27 +331,93 @@ const KIND_META: Record<
   AuditEventKind,
   { label: string; tone: string; bg: string }
 > = {
+  // Auth
+  login_success: { label: "Login", tone: C.olive, bg: `${C.olive}11` },
+  login_failed: {
+    label: "Login fallido",
+    tone: C.terracotta,
+    bg: `${C.terracotta}11`,
+  },
+  login_locked: {
+    label: "Bloqueo",
+    tone: C.terracotta,
+    bg: `${C.terracotta}22`,
+  },
+  password_reset_requested: {
+    label: "Reset solicitado",
+    tone: C.cacao,
+    bg: `${C.cacao}11`,
+  },
+  password_reset_completed: {
+    label: "Reset OK",
+    tone: C.olive,
+    bg: `${C.olive}11`,
+  },
+  // Access code
+  access_code_rotated: {
+    label: "Código rotado",
+    tone: C.gold,
+    bg: `${C.gold}11`,
+  },
+  // Sessions
+  session_opened_by_admin: {
+    label: "Sesión abierta",
+    tone: C.cacao,
+    bg: `${C.cacao}11`,
+  },
+  walkin_account_opened: {
+    label: "Cuenta nueva",
+    tone: C.cacao,
+    bg: `${C.cacao}11`,
+  },
+  session_marked_paid: {
+    label: "Cobrada",
+    tone: C.olive,
+    bg: `${C.olive}11`,
+  },
+  session_closed: {
+    label: "Cerrada",
+    tone: C.mute,
+    bg: `${C.mute}11`,
+  },
+  session_voided: {
+    label: "Anulada",
+    tone: C.terracotta,
+    bg: `${C.terracotta}11`,
+  },
+  session_partial_payment: {
+    label: "Pago parcial",
+    tone: C.gold,
+    bg: `${C.gold}11`,
+  },
   bill_adjustment: {
     label: "Cuenta",
     tone: C.gold,
     bg: `${C.gold}11`,
   },
-  refund: {
-    label: "Reembolso",
-    tone: C.terracotta,
-    bg: `${C.terracotta}11`,
-  },
-  inventory_restock: {
-    label: "Reposición",
+  // Products
+  product_created: {
+    label: "Producto +",
     tone: C.olive,
     bg: `${C.olive}11`,
   },
-  inventory_waste: {
-    label: "Merma",
-    tone: C.terracotta,
-    bg: `${C.terracotta}11`,
+  product_updated: {
+    label: "Producto editado",
+    tone: C.cacao,
+    bg: `${C.cacao}11`,
   },
-  inventory_adjust: {
+  product_activated: {
+    label: "Producto on",
+    tone: C.olive,
+    bg: `${C.olive}11`,
+  },
+  product_deactivated: {
+    label: "Producto off",
+    tone: C.mute,
+    bg: `${C.mute}11`,
+  },
+  // Inventory
+  inventory_movement: {
     label: "Stock",
     tone: C.cacao,
     bg: `${C.cacao}11`,
@@ -301,7 +425,17 @@ const KIND_META: Record<
 };
 
 function EventRow({ event }: { event: AuditEvent }) {
-  const meta = KIND_META[event.kind];
+  const meta = KIND_META[event.kind] ?? {
+    label: event.kind,
+    tone: C.mute,
+    bg: `${C.mute}11`,
+  };
+  const m = event.metadata;
+  const tableNumber =
+    typeof m.table_number === "number" ? m.table_number : undefined;
+  const tableId = typeof m.table_id === "number" ? m.table_id : undefined;
+  const productName =
+    typeof m.product_name === "string" ? m.product_name : undefined;
   return (
     <li
       style={{
@@ -356,17 +490,18 @@ function EventRow({ event }: { event: AuditEvent }) {
           }}
         >
           <span>{timeAgo(event.created_at)}</span>
-          {event.created_by && (
+          {event.actor_label && (
             <span>
-              por <strong style={{ color: C.cacao }}>{event.created_by}</strong>
+              por{" "}
+              <strong style={{ color: C.cacao }}>{event.actor_label}</strong>
             </span>
           )}
-          {event.context.table_id != null && (
-            <span>mesa {event.context.table_id}</span>
+          {tableNumber != null && <span>mesa {tableNumber}</span>}
+          {tableNumber == null && tableId != null && (
+            <span>cuenta #{tableId}</span>
           )}
-          {event.context.product_name && (
-            <span>{event.context.product_name}</span>
-          )}
+          {productName && <span>{productName}</span>}
+          {event.ip && <span>ip {event.ip}</span>}
         </div>
       </div>
     </li>

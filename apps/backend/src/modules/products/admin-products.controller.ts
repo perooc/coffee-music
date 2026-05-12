@@ -21,6 +21,7 @@ import {
   InventoryMovementsService,
 } from "./inventory-movements.service";
 import { ProductsService } from "./products.service";
+import { AuditLogService } from "../audit-log/audit-log.service";
 
 /**
  * Admin product surface (Phase H2).
@@ -41,6 +42,7 @@ export class AdminProductsController {
   constructor(
     private readonly products: ProductsService,
     private readonly movements: InventoryMovementsService,
+    private readonly audit: AuditLogService,
   ) {}
 
   @Get()
@@ -63,37 +65,119 @@ export class AdminProductsController {
   }
 
   @Post()
-  create(@Body() dto: CreateProductDto) {
-    return this.products.create(dto);
+  async create(@Body() dto: CreateProductDto, @CurrentAuth() auth: AuthPayload) {
+    const product = await this.products.create(dto);
+    if (auth && auth.kind === "admin") {
+      void this.audit.record({
+        kind: "product_created",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        product_id: product.id,
+        product_name: product.name,
+      });
+    }
+    return product;
   }
 
   @Patch(":id")
-  update(
+  async update(
     @Param("id", ParseIntPipe) id: number,
     @Body() dto: UpdateProductDto,
+    @CurrentAuth() auth: AuthPayload,
   ) {
-    return this.products.update(id, dto);
+    // Snapshot before so the audit row can describe what changed.
+    const before = await this.products.findOneForAdmin(id);
+    const after = await this.products.update(id, dto);
+    if (auth && auth.kind === "admin") {
+      const changes: Record<string, { from: unknown; to: unknown }> = {};
+      const keys: (keyof UpdateProductDto)[] = [
+        "name",
+        "description",
+        "price",
+        "category",
+        "low_stock_threshold",
+      ];
+      for (const k of keys) {
+        const fromVal = (before as unknown as Record<string, unknown>)[k];
+        const toVal = (after as unknown as Record<string, unknown>)[k];
+        if (fromVal !== toVal && (dto as Record<string, unknown>)[k] != null) {
+          changes[k] = { from: fromVal, to: toVal };
+        }
+      }
+      void this.audit.record({
+        kind: "product_updated",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        product_id: after.id,
+        product_name: after.name,
+        changes,
+      });
+    }
+    return after;
   }
 
   @Patch(":id/activate")
-  activate(@Param("id", ParseIntPipe) id: number) {
-    return this.products.setActive(id, true);
+  async activate(
+    @Param("id", ParseIntPipe) id: number,
+    @CurrentAuth() auth: AuthPayload,
+  ) {
+    const product = await this.products.setActive(id, true);
+    if (auth && auth.kind === "admin") {
+      void this.audit.record({
+        kind: "product_activated",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        product_id: product.id,
+        product_name: product.name,
+      });
+    }
+    return product;
   }
 
   @Patch(":id/deactivate")
-  deactivate(@Param("id", ParseIntPipe) id: number) {
-    return this.products.setActive(id, false);
+  async deactivate(
+    @Param("id", ParseIntPipe) id: number,
+    @CurrentAuth() auth: AuthPayload,
+  ) {
+    const product = await this.products.setActive(id, false);
+    if (auth && auth.kind === "admin") {
+      void this.audit.record({
+        kind: "product_deactivated",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        product_id: product.id,
+        product_name: product.name,
+      });
+    }
+    return product;
   }
 
   // ─── Inventory movements (Phase H3) ─────────────────────────────────────
 
   @Post(":id/stock-movements")
-  recordStockMovement(
+  async recordStockMovement(
     @Param("id", ParseIntPipe) id: number,
     @Body() dto: CreateStockMovementDto,
     @CurrentAuth() auth: AuthPayload,
   ) {
-    return this.movements.record(id, dto, toActor(auth));
+    const movement = await this.movements.record(id, dto, toActor(auth));
+    if (auth && auth.kind === "admin") {
+      // Inventory service returns a slim product shape ({id, stock}); fetch
+      // the full row separately for the audit summary. Cheap and avoids
+      // changing the service contract just for the log line.
+      const product = await this.products.findOneForAdmin(id).catch(() => null);
+      void this.audit.record({
+        kind: "inventory_movement",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        product_id: id,
+        product_name: product?.name ?? `producto #${id}`,
+        movement_type: dto.type,
+        quantity: dto.quantity,
+        reason: dto.reason ?? null,
+      });
+    }
+    return movement;
   }
 
   @Get(":id/stock-movements")

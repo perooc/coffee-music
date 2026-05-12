@@ -18,12 +18,14 @@ import { SessionAccessGuard } from "../auth/guards/session-access.guard";
 import { CurrentAuth } from "../auth/guards/current-auth.decorator";
 import { TokenService } from "../auth/token.service";
 import type { AuthPayload } from "../auth/types";
+import { AuditLogService } from "../audit-log/audit-log.service";
 
 @Controller()
 export class TableSessionsController {
   constructor(
     private readonly sessions: TableSessionsService,
     private readonly tokens: TokenService,
+    private readonly audit: AuditLogService,
   ) {}
 
   /**
@@ -110,10 +112,34 @@ export class TableSessionsController {
   @Post("admin/table-sessions/open")
   @UseGuards(JwtGuard)
   @AuthKinds("admin")
-  async openByAdmin(@Body() dto: OpenSessionDto & { custom_name?: string }) {
+  async openByAdmin(
+    @Body() dto: OpenSessionDto & { custom_name?: string },
+    @CurrentAuth() auth: AuthPayload,
+  ) {
+    if (!auth || auth.kind !== "admin") {
+      throw new ForbiddenException({
+        message: "Admin token required",
+        code: "AUTH_NOT_ADMIN",
+      });
+    }
+    const customName = dto.custom_name?.trim() || null;
     const session = await this.sessions.open(dto.table_id, {
-      customName: dto.custom_name?.trim() || null,
+      customName,
       openedBy: "staff",
+    });
+    // Look up the table once to enrich the audit summary. Cheap query
+    // and avoids special-casing the audit for the walk-in flow which
+    // already has the metadata in hand at the controller.
+    const table = await this.sessions.getTableForAudit(dto.table_id);
+    void this.audit.record({
+      kind: "session_opened_by_admin",
+      actor_id: auth.sub,
+      actor_label: auth.name,
+      session_id: session.id,
+      table_id: session.table_id,
+      table_number: table?.number ?? session.table_id,
+      custom_name: customName,
+      table_kind: table?.kind ?? "TABLE",
     });
     return this.sessions.serialize(session);
   }
@@ -125,8 +151,24 @@ export class TableSessionsController {
   @Post("table-sessions/:id/close")
   @UseGuards(JwtGuard)
   @AuthKinds("admin")
-  async close(@Param("id", ParseIntPipe) id: number) {
+  async close(
+    @Param("id", ParseIntPipe) id: number,
+    @CurrentAuth() auth: AuthPayload,
+  ) {
+    if (!auth || auth.kind !== "admin") {
+      throw new ForbiddenException({
+        message: "Admin token required",
+        code: "AUTH_NOT_ADMIN",
+      });
+    }
     const session = await this.sessions.close(id);
+    void this.audit.record({
+      kind: "session_closed",
+      actor_id: auth.sub,
+      actor_label: auth.name,
+      session_id: session.id,
+      table_id: session.table_id,
+    });
     return this.sessions.serialize(session);
   }
 
@@ -204,8 +246,25 @@ export class TableSessionsController {
   @Post("table-sessions/:id/mark-paid")
   @UseGuards(JwtGuard)
   @AuthKinds("admin")
-  async markPaid(@Param("id", ParseIntPipe) id: number) {
+  async markPaid(
+    @Param("id", ParseIntPipe) id: number,
+    @CurrentAuth() auth: AuthPayload,
+  ) {
+    if (!auth || auth.kind !== "admin") {
+      throw new ForbiddenException({
+        message: "Admin token required",
+        code: "AUTH_NOT_ADMIN",
+      });
+    }
     const session = await this.sessions.markPaid(id);
+    void this.audit.record({
+      kind: "session_marked_paid",
+      actor_id: auth.sub,
+      actor_label: auth.name,
+      session_id: session.id,
+      table_id: session.table_id,
+      total: Number(session.total_consumption),
+    });
     return this.sessions.serialize(session);
   }
 
@@ -237,6 +296,16 @@ export class TableSessionsController {
       reason: dto.reason,
       otherDetail: dto.other_detail,
       voidedBy: auth.name,
+    });
+    void this.audit.record({
+      kind: "session_voided",
+      actor_id: auth.sub,
+      actor_label: auth.name,
+      session_id: session.id,
+      table_id: session.table_id,
+      reason: dto.reason,
+      other_detail: dto.other_detail ?? null,
+      total_voided: Number(session.total_consumption),
     });
     return this.sessions.serialize(session);
   }

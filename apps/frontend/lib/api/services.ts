@@ -803,26 +803,38 @@ export interface MusicBudgetSnapshot {
 }
 
 // ─── Audit log (admin) ──────────────────────────────────────────────────────
+// Mirrors the backend enum AuditEventKind one-to-one. Adding a kind on
+// the backend requires updating this union — TS will flag the missing
+// label / icon mapping at compile time.
 export type AuditEventKind =
-  | "bill_adjustment"
-  | "refund"
-  | "inventory_restock"
-  | "inventory_waste"
-  | "inventory_adjust";
+  | "login_success"
+  | "login_failed"
+  | "login_locked"
+  | "password_reset_requested"
+  | "password_reset_completed"
+  | "access_code_rotated"
+  | "session_opened_by_admin"
+  | "session_marked_paid"
+  | "session_closed"
+  | "session_voided"
+  | "session_partial_payment"
+  | "walkin_account_opened"
+  | "product_created"
+  | "product_updated"
+  | "product_activated"
+  | "product_deactivated"
+  | "inventory_movement"
+  | "bill_adjustment";
 
 export interface AuditEvent {
   id: string;
   kind: AuditEventKind;
   created_at: string;
-  created_by: string | null;
+  actor_id: number | null;
+  actor_label: string | null;
   summary: string;
-  context: {
-    session_id?: number;
-    product_id?: number;
-    product_name?: string | null;
-    table_id?: number;
-    amount?: number;
-  };
+  metadata: Record<string, unknown>;
+  ip: string | null;
 }
 
 export const auditLogApi = {

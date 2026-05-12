@@ -15,6 +15,9 @@ import { UpdateTableDto } from "./dto/update-table.dto";
 import { CreateBarDto } from "./dto/create-bar.dto";
 import { JwtGuard } from "../auth/guards/jwt.guard";
 import { AuthKinds } from "../auth/guards/decorators";
+import { CurrentAuth } from "../auth/guards/current-auth.decorator";
+import type { AuthPayload } from "../auth/types";
+import { AuditLogService } from "../audit-log/audit-log.service";
 
 /**
  * Tables surface = staff only. Customers do not need to list tables; they
@@ -28,6 +31,7 @@ export class TablesController {
   constructor(
     private readonly tablesService: TablesService,
     private readonly sessions: TableSessionsService,
+    private readonly audit: AuditLogService,
   ) {}
 
   @Get()
@@ -73,13 +77,26 @@ export class TablesController {
    * we'd leak orphan BAR rows the staff couldn't easily clean up.
    */
   @Post("bars/walkin")
-  async openWalkInAccount(@Body() dto: CreateBarDto) {
+  async openWalkInAccount(
+    @Body() dto: CreateBarDto,
+    @CurrentAuth() auth: AuthPayload,
+  ) {
     const bar = await this.tablesService.createBar(dto.name);
     try {
       const session = await this.sessions.open(bar.id, {
         customName: dto.name,
         openedBy: "staff",
       });
+      if (auth && auth.kind === "admin") {
+        void this.audit.record({
+          kind: "walkin_account_opened",
+          actor_id: auth.sub,
+          actor_label: auth.name,
+          session_id: session.id,
+          table_id: bar.id,
+          custom_name: dto.name,
+        });
+      }
       return {
         table: bar,
         session: this.sessions.serialize(session),

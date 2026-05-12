@@ -44,8 +44,8 @@ export class AuthController {
    * the endpoint can't be used to enumerate admins.
    */
   @Post("forgot-password")
-  async forgot(@Body() body: { email: string }) {
-    return this.auth.requestPasswordReset(body?.email ?? "");
+  async forgot(@Body() body: { email: string }, @Req() req: Request) {
+    return this.auth.requestPasswordReset(body?.email ?? "", clientIp(req));
   }
 
   /**

@@ -477,4 +477,17 @@ export class TableSessionsService {
       total_consumption: Number(session.total_consumption),
     };
   }
+
+  /**
+   * Slim read of a Table for callers that only need the audit-grade
+   * metadata (number, kind). Lives here so we don't force TableSessions
+   * callers to import TablesService — the lookup is trivial and the
+   * coupling pays off in keeping the audit log tight.
+   */
+  async getTableForAudit(tableId: number) {
+    return this.prisma.table.findUnique({
+      where: { id: tableId },
+      select: { id: true, number: true, kind: true },
+    });
+  }
 }

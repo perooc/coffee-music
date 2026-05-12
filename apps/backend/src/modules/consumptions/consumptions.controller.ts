@@ -16,10 +16,14 @@ import { AuthKinds } from "../auth/guards/decorators";
 import { SessionAccessGuard } from "../auth/guards/session-access.guard";
 import { CurrentAuth } from "../auth/guards/current-auth.decorator";
 import type { AuthPayload } from "../auth/types";
+import { AuditLogService } from "../audit-log/audit-log.service";
 
 @Controller()
 export class ConsumptionsController {
-  constructor(private readonly service: ConsumptionsService) {}
+  constructor(
+    private readonly service: ConsumptionsService,
+    private readonly audit: AuditLogService,
+  ) {}
 
   /**
    * Bill view. Admin sees any session; session client sees only its own.
@@ -46,6 +50,19 @@ export class ConsumptionsController {
       dto,
       toActor(auth),
     );
+    if (auth && auth.kind === "admin") {
+      void this.audit.record({
+        kind: "bill_adjustment",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        session_id: sessionId,
+        table_id: created.table_session_id,
+        adjustment_type: dto.type === "discount" ? "discount" : "adjustment",
+        amount: Number(created.amount),
+        description: created.description,
+        reason: created.reason,
+      });
+    }
     return this.service.serialize(created);
   }
 
@@ -68,6 +85,16 @@ export class ConsumptionsController {
       dto.amount,
       toActor(auth),
     );
+    if (auth && auth.kind === "admin") {
+      void this.audit.record({
+        kind: "session_partial_payment",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        session_id: sessionId,
+        table_id: created.table_session_id,
+        amount: Number(dto.amount),
+      });
+    }
     return this.service.serialize(created);
   }
 
@@ -84,6 +111,19 @@ export class ConsumptionsController {
       dto,
       toActor(auth),
     );
+    if (auth && auth.kind === "admin") {
+      void this.audit.record({
+        kind: "bill_adjustment",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        session_id: refund.table_session_id,
+        table_id: refund.table_session_id,
+        adjustment_type: "refund",
+        amount: Number(refund.amount),
+        description: refund.description,
+        reason: refund.reason,
+      });
+    }
     return this.service.serialize(refund);
   }
 }
