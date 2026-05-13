@@ -72,7 +72,13 @@ export function TablesMap({ tables, onSelect, onMutated }: Props) {
   // without the kind column (defensive — the backend always sends it
   // post-migration, but this keeps the UI robust if the cache is stale).
   const realTables = tables.filter((t) => (t.kind ?? "TABLE") === "TABLE");
-  const bars = tables.filter((t) => t.kind === "BAR");
+  // Solo mostramos barras CON sesión activa. Las barras cerradas siguen
+  // en la base (porque borrarlas haría cascade a Consumption y los
+  // ingresos del día desaparecerían), pero no las queremos llenando la
+  // grilla — una vez cobrada, la barra ya no es operable.
+  const bars = tables.filter(
+    (t) => t.kind === "BAR" && t.current_session_id != null,
+  );
 
   const sortedTables = sortTables(realTables);
   const sortedBars = sortTables(bars);

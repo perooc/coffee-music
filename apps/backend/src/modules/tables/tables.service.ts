@@ -77,14 +77,12 @@ export class TablesService {
   constructor(private readonly prisma: PrismaService) {}
 
   async findAll() {
-    // Sweep closed BAR rows before serving — they're ephemeral by
-    // design (one bar account per customer, dies with its session).
-    // Best-effort: a delete failure here shouldn't break the listing.
-    try {
-      await this.pruneClosedBars();
-    } catch {
-      /* non-fatal */
-    }
+    // Antes corríamos `pruneClosedBars()` acá para limpiar barras
+    // virtuales cerradas. Lo SACAMOS porque la cascade Table → Session
+    // → Consumption borra las consumiciones del histórico de ventas,
+    // y eso hace que los ingresos del día desaparezcan al refrescar
+    // la grilla. Las barras cerradas se quedan en la base; el frontend
+    // filtra cuáles mostrar según si tienen sesión activa.
     const tables = await this.prisma.table.findMany({
       include: tableListInclude,
       orderBy: {
@@ -210,26 +208,26 @@ export class TablesService {
   }
 
   /**
-   * Auto-prune all closed BAR rows. We call this opportunistically when
-   * the admin lists tables, so accounts that were closed (e.g. cashier
-   * pressed "Cobrar y cerrar" on a virtual bar) disappear from the
-   * grid without an explicit cleanup step. Physical tables are never
-   * touched.
+   * ⚠️ NO LLAMAR. Función dejada acá como referencia histórica.
    *
-   * Safe to run as a side-effect of findAll — it only deletes BARs that
-   * have no current_session and no rows referencing them through
-   * sessions (orders/consumptions live on session, which is gone after
-   * close → cascades). If a delete races against a re-open, the unique
-   * index on current_session_id will surface the conflict.
+   * Antes corría automáticamente desde findAll() para "limpiar" las
+   * barras virtuales cerradas. El problema: la cascade
+   *   Table → TableSession → Consumption (onDelete: Cascade)
+   * borraba las consumiciones del histórico de ventas, y los ingresos
+   * del día desaparecían al refrescar.
+   *
+   * Si se necesita una limpieza manual de barras viejas, hacerlo con
+   * un script ad-hoc que primero migre las consumiciones a una mesa
+   * "ARCHIVO" o similar, y solo entonces borre la fila de Table.
+   *
+   * Mantener el método (vs borrarlo) deja un cartel visible en el
+   * código para futuros operadores: "no implementes esto sin leer el
+   * comentario de arriba".
    */
   async pruneClosedBars(): Promise<number> {
-    const result = await this.prisma.table.deleteMany({
-      where: {
-        kind: TableKind.BAR,
-        current_session_id: null,
-      },
-    });
-    return result.count;
+    throw new Error(
+      "pruneClosedBars is disabled: cascading delete would destroy Consumption rows. See method comment.",
+    );
   }
 
   private serializeTable(table: Table) {
