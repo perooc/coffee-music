@@ -381,7 +381,60 @@ export const adminProductsApi = {
     adminApi
       .patch<Product>(`/admin/products/${id}/deactivate`)
       .then((r) => r.data),
+
+  // ─── Recipes ─────────────────────────────────────────────────────────────
+  /** Devuelve la receta del producto (slots + opciones serializados). */
+  getRecipe: (id: number): Promise<ProductRecipeSlotView[]> =>
+    adminApi
+      .get<ProductRecipeSlotView[]>(`/admin/products/${id}/recipe`)
+      .then((r) => r.data),
+
+  /** Reemplaza la receta entera. Vacío = producto pasa a simple. */
+  putRecipe: (
+    id: number,
+    slots: ProductRecipeSlotPayload[],
+  ): Promise<ProductRecipeSlotView[]> =>
+    adminApi
+      .put<ProductRecipeSlotView[]>(`/admin/products/${id}/recipe`, { slots })
+      .then((r) => r.data),
 };
+
+// ─── Recipe types ───────────────────────────────────────────────────────────
+export interface ProductRecipeOptionPayload {
+  component_id: number;
+  default_quantity: number;
+  position?: number;
+}
+
+export interface ProductRecipeSlotPayload {
+  label: string;
+  quantity: number;
+  position?: number;
+  options: ProductRecipeOptionPayload[];
+}
+
+export interface ProductRecipeOptionView {
+  id: number;
+  component_id: number;
+  default_quantity: number;
+  position: number;
+  component: {
+    id: number;
+    sku: string;
+    name: string;
+    category: string;
+    stock: number;
+    is_active: boolean;
+  };
+}
+
+export interface ProductRecipeSlotView {
+  id: number;
+  label: string;
+  quantity: number;
+  position: number;
+  options: ProductRecipeOptionView[];
+}
 
 // ─── Sales insights (Phase H5 + dashboard ejecutivo) ─────────────────────────
 export type ProductSalesSummary = {

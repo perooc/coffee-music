@@ -310,6 +310,7 @@ export default function AdminProductsPage() {
           }
           product={selectedProduct}
           initialMode={panelIntent.mode}
+          allProducts={products}
           onSaved={() => void refresh()}
           onClose={() => setSelectedId(null)}
         />

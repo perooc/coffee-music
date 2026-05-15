@@ -41,6 +41,7 @@ import {
   inventoryMovementsApi,
 } from "@/lib/api/services";
 import { getErrorMessage } from "@/lib/errors";
+import { ProductRecipeEditor } from "./ProductRecipeEditor";
 import {
   C,
   FONT_DISPLAY,
@@ -64,6 +65,11 @@ interface Props {
    * Esto evita el patrón setState-in-effect.
    */
   initialMode?: Mode;
+  /**
+   * Catálogo completo. Necesario para el editor de recetas (modo edit)
+   * porque necesita listar los productos componentes elegibles.
+   */
+  allProducts?: Product[];
   onSaved: () => void;
   onClose: () => void;
 }
@@ -71,6 +77,7 @@ interface Props {
 export function ProductDetailPanel({
   product,
   initialMode = "view",
+  allProducts = [],
   onSaved,
   onClose,
 }: Props) {
@@ -128,6 +135,7 @@ export function ProductDetailPanel({
             {mode === "edit" && (
               <EditMode
                 product={product}
+                allProducts={allProducts}
                 onCancel={() => setMode("view")}
                 onSaved={() => {
                   onSaved();
@@ -392,10 +400,12 @@ function ToggleActiveButton({
 
 function EditMode({
   product,
+  allProducts,
   onCancel,
   onSaved,
 }: {
   product: Product;
+  allProducts: Product[];
   onCancel: () => void;
   onSaved: () => void;
 }) {
@@ -531,6 +541,20 @@ function EditMode({
         {error && <ErrorBanner text={error} />}
         <PanelActions onCancel={onCancel} submitting={submitting} />
       </form>
+
+      {/* Recipe editor — vive afuera del form principal porque tiene
+          su propio submit (PUT al endpoint de receta) y queremos que
+          el operador pueda guardar metadatos y receta por separado. */}
+      <div
+        style={{
+          padding: "0 18px 18px",
+        }}
+      >
+        <ProductRecipeEditor
+          productId={product.id}
+          allProducts={allProducts}
+        />
+      </div>
     </>
   );
 }
