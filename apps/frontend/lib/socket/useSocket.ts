@@ -156,6 +156,12 @@ interface UseSocketOptions {
   onTableSessionOpened?: SocketListener<"table-session:opened">;
   onTableSessionUpdated?: SocketListener<"table-session:updated">;
   onTableSessionClosed?: SocketListener<"table-session:closed">;
+  /**
+   * Batch de productos cuyo stock, precio, estado o receta cambió.
+   * Las vistas que mantienen un catálogo en memoria (mesa, admin
+   * productos) deben hacer merge por id sin recargar todo.
+   */
+  onProductUpdated?: SocketListener<"product:updated">;
   onReconnect?: () => void;
 }
 
@@ -175,6 +181,7 @@ export function useSocket(options: UseSocketOptions = {}) {
     onTableSessionOpened,
     onTableSessionUpdated,
     onTableSessionClosed,
+    onProductUpdated,
     onReconnect,
   } = options;
   const socketRef = useRef<Socket | null>(null);
@@ -270,6 +277,11 @@ export function useSocket(options: UseSocketOptions = {}) {
         "table-session:closed",
         onTableSessionClosed,
       );
+    if (onProductUpdated)
+      s.off("product:updated", onProductUpdated).on(
+        "product:updated",
+        onProductUpdated,
+      );
 
     return () => {
       s.off("connect", joinRooms);
@@ -291,6 +303,7 @@ export function useSocket(options: UseSocketOptions = {}) {
         s.off("table-session:updated", onTableSessionUpdated);
       if (onTableSessionClosed)
         s.off("table-session:closed", onTableSessionClosed);
+      if (onProductUpdated) s.off("product:updated", onProductUpdated);
     };
   }, [
     sessionId,
@@ -307,6 +320,7 @@ export function useSocket(options: UseSocketOptions = {}) {
     onTableSessionOpened,
     onTableSessionUpdated,
     onTableSessionClosed,
+    onProductUpdated,
     onReconnect,
   ]);
 

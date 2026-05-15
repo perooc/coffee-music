@@ -4,6 +4,7 @@ import { PrismaService } from "../../database/prisma.service";
 import { CreateProductDto } from "./dto/create-product.dto";
 import { UpdateProductDto } from "./dto/update-product.dto";
 import { ProductAvailabilityService } from "./product-availability.service";
+import { RealtimeGateway } from "../realtime/realtime.gateway";
 
 /**
  * Public-facing product is the same row but with computed flags so the
@@ -25,7 +26,58 @@ export class ProductsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly availability: ProductAvailabilityService,
+    private readonly realtime: RealtimeGateway,
   ) {}
+
+  /**
+   * Notifica a clientes (mesa) y staff que la lista de productos cambió.
+   * Cuando se pasa una lista de `productIds`, se emite también el conjunto
+   * de productos que dependen de cualquiera de ellos como componente — un
+   * cambio de stock en una cerveza puede dejar agotados varios cubetazos.
+   *
+   * No throw: si la consulta falla, se ignora; la UI sigue funcionando
+   * porque puede recargar manualmente o esperar el próximo evento.
+   */
+  async broadcastChanged(productIds?: number[]): Promise<void> {
+    try {
+      const ids = productIds && productIds.length > 0
+        ? await this.expandToDependentComposites(productIds)
+        : null;
+      const products = await this.prisma.product.findMany({
+        where: ids ? { id: { in: ids } } : { is_active: true },
+        orderBy: [{ category: "asc" }, { name: "asc" }],
+      });
+      if (products.length === 0) return;
+      const availabilityMap = await this.availability.computeForProducts(
+        products.map((p) => p.id),
+      );
+      const payload = products.map((p) =>
+        this.serialize(p, availabilityMap.get(p.id)),
+      );
+      this.realtime.emitProductUpdated({ products: payload });
+    } catch {
+      // best-effort; no throw on broadcast path
+    }
+  }
+
+  /**
+   * Dado un set de productos cuyo stock o atributos cambiaron, devuelve el
+   * conjunto ampliado que incluye además todos los compuestos que usan
+   * alguno de ellos como componente. Así el broadcast cubre dependencias
+   * indirectas (e.g., bajar stock de Aguila marca como agotados los
+   * cubetazos que dependen de ella).
+   */
+  private async expandToDependentComposites(
+    productIds: number[],
+  ): Promise<number[]> {
+    const options = await this.prisma.productRecipeOption.findMany({
+      where: { component_id: { in: productIds } },
+      select: { slot: { select: { product_id: true } } },
+    });
+    const ids = new Set<number>(productIds);
+    for (const o of options) ids.add(o.slot.product_id);
+    return Array.from(ids);
+  }
 
   // ─── Public read: cart / catalog ────────────────────────────────────────
   // Customers only see active products. Inactive products stay in the DB

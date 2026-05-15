@@ -3,6 +3,7 @@ import type {
   Order,
   OrderRequest,
   PlaybackState,
+  Product,
   QueueItem,
   Table,
   TableSession,
@@ -40,6 +41,10 @@ export type SocketEvents = {
   // global
   "queue:updated": QueueItem[];
   "playback:updated": PlaybackState;
+  // Productos cuyo stock, precio, estado o receta cambió. Se manda como
+  // batch: el cliente reemplaza/inserta cada uno por id. Cubre tanto el
+  // panel admin de productos como las vistas /mesa/*.
+  "product:updated": { products: Product[] };
 
   // client → server
   "song:request": SongRequestPayload;

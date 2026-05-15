@@ -11,6 +11,7 @@ import {
   TableSessionStatus,
 } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { ProductsService } from "../products/products.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { TableProjectionService } from "../table-projection/table-projection.service";
 import { CreateOrderRequestDto } from "./dto/create-order-request.dto";
@@ -75,6 +76,7 @@ export class OrderRequestsService {
     private readonly prisma: PrismaService,
     private readonly projection: TableProjectionService,
     private readonly realtime: RealtimeGateway,
+    private readonly products: ProductsService,
   ) {}
 
   async create(dto: CreateOrderRequestDto): Promise<OrderRequestFull> {
@@ -199,7 +201,11 @@ export class OrderRequestsService {
         where: { id: requestId },
         include: INCLUDE_FOR_SERIALIZE,
       });
-      return { request: fresh!, order: freshOrder! };
+      return {
+        request: fresh!,
+        order: freshOrder!,
+        affectedIds: this.collectAffectedProductIdsFromPlan(plan),
+      };
     });
 
     this.realtime.emitOrderRequestUpdated(
@@ -214,6 +220,7 @@ export class OrderRequestsService {
       request.table_session.table_id,
     );
     if (snap) this.realtime.emitTableUpdated(snap);
+    void this.products.broadcastChanged(result.affectedIds);
     return result.request;
   }
 
@@ -285,7 +292,11 @@ export class OrderRequestsService {
         where: { id: request.id },
         include: INCLUDE_FOR_SERIALIZE,
       });
-      return { request: fresh!, order: freshOrder! };
+      return {
+        request: fresh!,
+        order: freshOrder!,
+        affectedIds: this.collectAffectedProductIdsFromPlan(plan),
+      };
     });
 
     this.realtime.emitOrderRequestCreated(
@@ -298,7 +309,29 @@ export class OrderRequestsService {
     );
     const snap = await this.projection.snapshotForBroadcast(session.table_id);
     if (snap) this.realtime.emitTableUpdated(snap);
+    void this.products.broadcastChanged(result.affectedIds);
     return result.request;
+  }
+
+  /**
+   * IDs cuyos stocks cambiaron en este pedido: incluye el producto del
+   * item (puede ser un compuesto cuyo stock propio no se toca, pero
+   * sirve para que la grilla lo recomponga) y todos los componentes
+   * efectivamente descontados.
+   */
+  private collectAffectedProductIdsFromPlan(
+    plan: ResolvedItem[],
+  ): number[] {
+    const ids = new Set<number>();
+    for (const item of plan) {
+      ids.add(item.product_id);
+      if (item.composite_units.length > 0) {
+        for (const unit of item.composite_units) {
+          for (const cid of unit.components.keys()) ids.add(cid);
+        }
+      }
+    }
+    return Array.from(ids);
   }
 
   async reject(requestId: number, reason?: string): Promise<OrderRequestFull> {

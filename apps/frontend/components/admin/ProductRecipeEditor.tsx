@@ -424,6 +424,7 @@ function SlotEditor({
         display: "flex",
         flexDirection: "column",
         gap: 8,
+        minWidth: 0,
       }}
     >
       <div
@@ -431,6 +432,8 @@ function SlotEditor({
           display: "flex",
           gap: 8,
           alignItems: "center",
+          minWidth: 0,
+          flexWrap: "wrap",
         }}
       >
         <span
@@ -450,9 +453,9 @@ function SlotEditor({
           type="text"
           value={slot.label}
           onChange={(e) => onChange({ label: e.target.value })}
-          placeholder="Etiqueta (ej. Cervezas, Licor)"
+          placeholder="Etiqueta (ej. Cervezas)"
           maxLength={60}
-          style={{ ...inputBase, flex: 1 }}
+          style={{ ...inputBase, flex: 1, minWidth: 0 }}
         />
         <input
           type="number"
@@ -464,7 +467,7 @@ function SlotEditor({
               quantity: Math.max(0, Math.floor(Number(e.target.value) || 0)),
             })
           }
-          style={{ ...inputBase, width: 72, textAlign: "right" }}
+          style={{ ...inputBase, width: 60, textAlign: "right" }}
           aria-label="Cantidad total del slot"
         />
         <button
@@ -482,6 +485,7 @@ function SlotEditor({
             cursor: "pointer",
             fontSize: 14,
             lineHeight: 1,
+            flexShrink: 0,
           }}
         >
           ✕
@@ -575,12 +579,29 @@ function OptionEditor({
     onChange({ component_id: Number.isFinite(val) && val > 0 ? val : null });
   };
 
+  // Layout en 2 filas para no desbordar el panel lateral (angosto):
+  // fila 1 → select del componente, full-width. Fila 2 → label "Default",
+  // stepper compacto +/− con número editable, y botón eliminar al extremo.
+  // El stepper reemplaza el <input type="number">: en móvil el spinner
+  // nativo invade el ancho y empuja el resto del row.
+  const dec = () =>
+    onChange({
+      default_quantity: Math.max(0, option.default_quantity - 1),
+    });
+  const inc = () =>
+    onChange({ default_quantity: option.default_quantity + 1 });
+
   return (
     <div
       style={{
         display: "flex",
+        flexDirection: "column",
         gap: 6,
-        alignItems: "center",
+        padding: 8,
+        border: `1px solid ${C.sand}`,
+        borderRadius: 8,
+        background: C.paper,
+        minWidth: 0,
       }}
     >
       <select
@@ -588,7 +609,9 @@ function OptionEditor({
         onChange={onSelect}
         style={{
           ...inputBase,
-          flex: 1,
+          width: "100%",
+          minWidth: 0,
+          maxWidth: "100%",
           appearance: "none",
           backgroundImage:
             "linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%)",
@@ -597,6 +620,7 @@ function OptionEditor({
           backgroundSize: "6px 6px",
           backgroundRepeat: "no-repeat",
           paddingRight: 24,
+          textOverflow: "ellipsis",
         }}
       >
         <option value="">— Elegí componente —</option>
@@ -605,46 +629,110 @@ function OptionEditor({
           return (
             <option key={p.id} value={p.id} disabled={isUsed}>
               {p.name}
-              {isUsed ? " (ya elegido en este slot)" : ""}
+              {isUsed ? " (ya elegido)" : ""}
             </option>
           );
         })}
       </select>
-      <input
-        type="number"
-        min={0}
-        step={1}
-        value={option.default_quantity}
-        onChange={(e) =>
-          onChange({
-            default_quantity: Math.max(0, Math.floor(Number(e.target.value) || 0)),
-          })
-        }
-        style={{ ...inputBase, width: 60, textAlign: "right" }}
-        aria-label="Cantidad por defecto"
-      />
-      <button
-        type="button"
-        onClick={onRemove}
-        disabled={!canRemove}
-        aria-label="Eliminar opción"
-        title={canRemove ? "Eliminar opción" : "Al menos una opción requerida"}
+      <div
         style={{
-          width: 26,
-          height: 26,
-          border: `1px solid ${C.sand}`,
-          background: C.paper,
-          color: canRemove ? C.mute : C.sand,
-          borderRadius: 999,
-          cursor: canRemove ? "pointer" : "not-allowed",
-          fontSize: 12,
-          lineHeight: 1,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
         }}
       >
-        ✕
-      </button>
+        <span
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            letterSpacing: 1.2,
+            color: C.mute,
+            textTransform: "uppercase",
+            fontWeight: 700,
+            flex: 1,
+          }}
+        >
+          Default
+        </span>
+        <button
+          type="button"
+          onClick={dec}
+          aria-label="Reducir default"
+          disabled={option.default_quantity <= 0}
+          style={stepperBtn(option.default_quantity <= 0)}
+        >
+          −
+        </button>
+        <input
+          type="number"
+          min={0}
+          step={1}
+          value={option.default_quantity}
+          onChange={(e) =>
+            onChange({
+              default_quantity: Math.max(0, Math.floor(Number(e.target.value) || 0)),
+            })
+          }
+          style={{
+            ...inputBase,
+            width: 48,
+            textAlign: "center",
+            padding: "6px 4px",
+            MozAppearance: "textfield",
+          }}
+          aria-label="Cantidad por defecto"
+        />
+        <button
+          type="button"
+          onClick={inc}
+          aria-label="Aumentar default"
+          style={stepperBtn(false)}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={!canRemove}
+          aria-label="Eliminar opción"
+          title={canRemove ? "Eliminar opción" : "Al menos una opción requerida"}
+          style={{
+            width: 26,
+            height: 26,
+            marginLeft: 4,
+            border: `1px solid ${C.sand}`,
+            background: C.paper,
+            color: canRemove ? C.mute : C.sand,
+            borderRadius: 999,
+            cursor: canRemove ? "pointer" : "not-allowed",
+            fontSize: 12,
+            lineHeight: 1,
+          }}
+        >
+          ✕
+        </button>
+      </div>
     </div>
   );
+}
+
+function stepperBtn(disabled: boolean): React.CSSProperties {
+  return {
+    width: 24,
+    height: 24,
+    borderRadius: 999,
+    border: `1px solid ${disabled ? C.sand : C.cacao}`,
+    background: disabled ? C.cream : C.paper,
+    color: disabled ? C.mute : C.ink,
+    fontFamily: FONT_DISPLAY,
+    fontSize: 14,
+    lineHeight: 1,
+    cursor: disabled ? "not-allowed" : "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+  };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

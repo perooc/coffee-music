@@ -259,6 +259,18 @@ export class RealtimeGateway
     this.emitGlobal("queue:updated", payload);
   }
 
+  /**
+   * Cambio de producto (stock, precio, activo, receta). Lo emitimos como
+   * `global` para que tanto los clientes en `/mesa/*` como las pestañas
+   * admin de producto recompongan su lista sin recargar. La carga es
+   * mínima: el payload trae sólo los campos necesarios para refrescar
+   * disponibilidad y precio. Si fuese necesario optimizar a futuro, se
+   * podría limitar a staff + session rooms abiertos.
+   */
+  emitProductUpdated(payload: unknown) {
+    this.emitGlobal("product:updated", payload);
+  }
+
   emitPlaybackUpdated(payload: unknown) {
     this.emitGlobal("playback:updated", payload);
   }

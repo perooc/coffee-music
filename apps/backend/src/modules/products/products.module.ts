@@ -7,9 +7,10 @@ import { ProductsService } from "./products.service";
 import { ProductRecipesService } from "./product-recipes.service";
 import { ProductAvailabilityService } from "./product-availability.service";
 import { AuditLogModule } from "../audit-log/audit-log.module";
+import { RealtimeModule } from "../realtime/realtime.module";
 
 @Module({
-  imports: [AuditLogModule],
+  imports: [AuditLogModule, RealtimeModule],
   controllers: [
     ProductsController,
     AdminProductsController,

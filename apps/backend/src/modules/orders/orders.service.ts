@@ -12,6 +12,7 @@ import {
 } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { ConsumptionsService } from "../consumptions/consumptions.service";
+import { ProductsService } from "../products/products.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { TableProjectionService } from "../table-projection/table-projection.service";
 
@@ -59,6 +60,7 @@ export class OrdersService {
     private readonly projection: TableProjectionService,
     private readonly realtime: RealtimeGateway,
     private readonly consumptions: ConsumptionsService,
+    private readonly products: ProductsService,
   ) {}
 
   async findAll(filter?: {
@@ -95,7 +97,12 @@ export class OrdersService {
     const order = await this.prisma.order.findUnique({
       where: { id },
       include: {
-        order_items: true,
+        // `components` viaja con cada order_item para que la cancelación
+        // de compuestos arme el plan exacto de reposición (sin esto la
+        // cancelación de un cubetazo mix no devolvía las cervezas reales
+        // — caía en el fallback de simple y trataba de sumar al stock
+        // del propio compuesto, que no se descuenta nunca).
+        order_items: { include: { components: true } },
         table_session: { select: { id: true, table_id: true } },
       },
     });
@@ -130,7 +137,6 @@ export class OrdersService {
           tx,
         );
       } else if (nextStatus === OrderStatus.cancelled) {
-        // Was in ACTIVE_STATUSES per transition table; restore stock.
         await this.restoreStock(tx, order.order_items);
         await this.projection.onOrderLeftActive(
           order.table_session.table_id,
@@ -159,7 +165,29 @@ export class OrdersService {
         order.table_session.table_id,
       );
     }
+    // Tras una cancelación se repuso stock; broadcasteamos los productos
+    // afectados (incluye compuestos que dependen de los componentes
+    // repuestos) para que la mesa y la grilla admin se actualicen sin
+    // recargar la página.
+    if (nextStatus === OrderStatus.cancelled) {
+      const ids = this.collectAffectedProductIds(order.order_items);
+      void this.products.broadcastChanged(ids);
+    }
     return result;
+  }
+
+  private collectAffectedProductIds(
+    items: Array<{
+      product_id: number;
+      components?: Array<{ component_product_id: number }>;
+    }>,
+  ): number[] {
+    const ids = new Set<number>();
+    for (const it of items) {
+      ids.add(it.product_id);
+      for (const c of it.components ?? []) ids.add(c.component_product_id);
+    }
+    return Array.from(ids);
   }
 
   // ─── internals ────────────────────────────────────────────────────────────

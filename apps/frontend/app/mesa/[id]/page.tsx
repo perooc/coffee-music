@@ -381,6 +381,30 @@ export default function MesaPage({
     },
     [tableId, setCurrentTable, currentTable],
   );
+  // Stock / disponibilidad realtime. El backend manda un batch de
+  // productos cuyo estado cambió (ventas, devoluciones, edición admin,
+  // movimientos de inventario). Hacemos merge por id sin recargar todo
+  // el catálogo: el listado en pantalla refleja el estado nuevo y los
+  // items en el carrito se reevalúan (agotado, precio).
+  const handleProductUpdated = useCallback(
+    (payload: { products: Product[] }) => {
+      if (!payload?.products?.length) return;
+      const incomingById = new Map(payload.products.map((p) => [p.id, p]));
+      setProducts((prev) => {
+        const merged = prev.map((p) =>
+          incomingById.has(p.id) ? incomingById.get(p.id)! : p,
+        );
+        // Productos que no estaban en la lista anterior (alta nueva /
+        // activación): los anexamos al final; el filtro por activo y
+        // orden por categoría lo aplica la UI al renderizar.
+        for (const fresh of payload.products) {
+          if (!merged.some((p) => p.id === fresh.id)) merged.push(fresh);
+        }
+        return merged;
+      });
+    },
+    [],
+  );
   const handleOrderCreatedOrUpdated = useCallback(
     (o: Order) => {
       console.log("[Mesa] order:created/updated arrived", {
@@ -468,6 +492,7 @@ export default function MesaPage({
     onBillUpdated: handleBillUpdated,
     onTableSessionUpdated: handleTableSessionUpdated,
     onTableSessionClosed: handleSessionClosed,
+    onProductUpdated: handleProductUpdated,
     onReconnect: handleSocketReconnect,
   });
 

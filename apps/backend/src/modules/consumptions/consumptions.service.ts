@@ -11,6 +11,7 @@ import {
   TableSessionStatus,
 } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
+import { ProductsService } from "../products/products.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { TableProjectionService } from "../table-projection/table-projection.service";
 import {
@@ -67,6 +68,7 @@ export class ConsumptionsService {
     private readonly prisma: PrismaService,
     private readonly projection: TableProjectionService,
     private readonly realtime: RealtimeGateway,
+    private readonly products: ProductsService,
   ) {}
 
   async getBill(sessionId: number): Promise<BillView> {
@@ -381,8 +383,9 @@ export class ConsumptionsService {
 
       // Reponer stock cuando aplica. Buscamos el OrderItem y sus
       // componentes (compuestos) o el product_id directo (simples).
+      let affected: number[] = [];
       if (restoreStock && original.order_id && original.product_id) {
-        await this.restoreStockForRefund(
+        affected = await this.restoreStockForRefund(
           tx,
           original.order_id,
           original.product_id,
@@ -390,14 +393,17 @@ export class ConsumptionsService {
         );
       }
 
-      return created;
+      return { created, affected };
     });
 
     this.emitBillUpdates(
       original.table_session_id,
       original.table_session.table_id,
     );
-    return result;
+    if (result.affected.length > 0) {
+      void this.products.broadcastChanged(result.affected);
+    }
+    return result.created;
   }
 
   // ─── internals ────────────────────────────────────────────────────────────
@@ -462,26 +468,21 @@ export class ConsumptionsService {
     orderId: number,
     productId: number,
     consumptionQuantity: number,
-  ): Promise<void> {
+  ): Promise<number[]> {
+    const affected = new Set<number>();
     const orderItem = await tx.orderItem.findFirst({
       where: { order_id: orderId, product_id: productId },
       include: { components: true },
     });
     if (!orderItem) {
-      // Sin OrderItem no podemos saber componentes — fallback al
-      // descuento simple por product_id.
       await tx.product.update({
         where: { id: productId },
         data: { stock: { increment: consumptionQuantity } },
       });
-      return;
+      affected.add(productId);
+      return Array.from(affected);
     }
     if (orderItem.components.length > 0) {
-      // Compuesto: reponer los componentes reales que salieron.
-      // Si el refund cubre solo parte de la cantidad del OrderItem,
-      // reponemos proporcionalmente. Caso típico: refund total del
-      // OrderItem, donde consumptionQuantity == orderItem.quantity
-      // y la suma de componentes ya es exacta.
       const ratio = consumptionQuantity / orderItem.quantity;
       const totals = new Map<number, number>();
       for (const c of orderItem.components) {
@@ -497,15 +498,21 @@ export class ConsumptionsService {
             where: { id: componentId },
             data: { stock: { increment: qty } },
           });
+          affected.add(componentId);
         }
       }
+      // El producto compuesto en sí no cambió stock, pero incluirlo
+      // ayuda a que la grilla admin lo recomponga (la availability sí
+      // puede haber cambiado).
+      affected.add(productId);
     } else {
-      // Producto simple: reponer al propio product_id.
       await tx.product.update({
         where: { id: productId },
         data: { stock: { increment: consumptionQuantity } },
       });
+      affected.add(productId);
     }
+    return Array.from(affected);
   }
 
   async emitBillSnapshot(sessionId: number, tableId: number) {

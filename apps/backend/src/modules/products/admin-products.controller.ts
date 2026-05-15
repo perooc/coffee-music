@@ -83,6 +83,7 @@ export class AdminProductsController {
         product_name: product.name,
       });
     }
+    void this.products.broadcastChanged([product.id]);
     return product;
   }
 
@@ -120,6 +121,7 @@ export class AdminProductsController {
         changes,
       });
     }
+    void this.products.broadcastChanged([after.id]);
     return after;
   }
 
@@ -138,6 +140,7 @@ export class AdminProductsController {
         product_name: product.name,
       });
     }
+    void this.products.broadcastChanged([product.id]);
     return product;
   }
 
@@ -156,6 +159,7 @@ export class AdminProductsController {
         product_name: product.name,
       });
     }
+    void this.products.broadcastChanged([product.id]);
     return product;
   }
 
@@ -184,6 +188,7 @@ export class AdminProductsController {
         reason: dto.reason ?? null,
       });
     }
+    void this.products.broadcastChanged([id]);
     return movement;
   }
 
@@ -235,6 +240,7 @@ export class AdminProductsController {
         },
       });
     }
+    void this.products.broadcastChanged([id]);
     return recipe;
   }
 }

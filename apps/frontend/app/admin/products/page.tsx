@@ -27,6 +27,7 @@ import {
   DUR_BASE,
 } from "@/lib/theme";
 import { ProductDetailPanel } from "@/components/admin/ProductDetailPanel";
+import { useSocket } from "@/lib/socket/useSocket";
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 export default function AdminProductsPage() {
@@ -98,6 +99,28 @@ export default function AdminProductsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Sync entre pestañas: cuando otra superficie (admin principal,
+  // refunds, edit en otra tab) toca productos, recibimos el batch por
+  // socket y reescribimos por id sin reload. Si el producto no estaba
+  // en la lista (alta nueva), lo anexamos. No quitamos productos —
+  // un soft-delete viene como `is_active=false` y queda visible en el
+  // tab "Inactivos".
+  const handleProductUpdated = useCallback(
+    (payload: { products: Product[] }) => {
+      if (!payload?.products?.length) return;
+      const byId = new Map(payload.products.map((p) => [p.id, p]));
+      setProducts((prev) => {
+        const merged = prev.map((p) => (byId.has(p.id) ? byId.get(p.id)! : p));
+        for (const fresh of payload.products) {
+          if (!merged.some((p) => p.id === fresh.id)) merged.push(fresh);
+        }
+        return merged;
+      });
+    },
+    [],
+  );
+  useSocket({ staff: true, onProductUpdated: handleProductUpdated });
 
   // Derivado de selectedId — siempre miramos al `products` actual para
   // que después de un refresh el panel muestre la versión nueva del
@@ -531,10 +554,13 @@ function CatalogFilters({
   onCategoryChange: (v: string | null) => void;
 }) {
   const counts = useMemo(() => {
-    const all = products.length;
+    // "Todos" oculta inactivos en el display (line 143), así que el
+    // contador también — si no, dice 30 y aparecen 27 sin explicación.
+    // Los inactivos viven en su propio tab.
+    const all = products.filter((p) => p.is_active).length;
     const active = products.filter((p) => p.is_active).length;
     const low = products.filter(
-      (p) => p.is_low_stock || p.is_out_of_stock,
+      (p) => p.is_active && (p.is_low_stock || p.is_out_of_stock),
     ).length;
     const inactive = products.filter((p) => !p.is_active).length;
     return { all, active, low_stock: low, inactive };

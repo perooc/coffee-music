@@ -41,11 +41,22 @@ export const metadata: Metadata = {
   description:
     "Crown Bar 4.90: la música la eliges tú desde tu mesa. Pub futbolero y cafetería con jukebox social — escanea el QR y pon tu canción en la cola.",
   metadataBase: new URL("https://crownbar490.local"),
+  icons: {
+    // Sobreescribe el favicon default que Next pone automáticamente
+    // desde app/favicon.ico (que muestra el logo de Vercel/Next).
+    // El PNG es alta resolución y los navegadores lo down-samplean.
+    icon: [
+      { url: "/logo.png", type: "image/png" },
+    ],
+    shortcut: [{ url: "/logo.png" }],
+    apple: [{ url: "/logo.png" }],
+  },
   openGraph: {
     title: "Crown Bar 4.90 — La música la eliges tú",
     description:
       "Pub futbolero y cafetería con jukebox social. Escanea el QR de tu mesa y elige la música que suena en el bar.",
     type: "website",
+    images: ["/logo.png"],
   },
 };
 
