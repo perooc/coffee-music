@@ -343,7 +343,9 @@ export const adminProductsApi = {
   }): Promise<Product[]> => {
     const q = new URLSearchParams();
     if (params?.category) q.set("category", params.category);
-    if (params?.include_inactive === false) q.set("include_inactive", "false");
+    // Backend default: NO incluir inactivos. Sólo agregamos el flag
+    // cuando explícitamente queremos verlos (tab "Inactivos").
+    if (params?.include_inactive === true) q.set("include_inactive", "true");
     if (params?.low_stock) q.set("low_stock", "true");
     const suffix = q.toString() ? `?${q.toString()}` : "";
     return adminApi.get<Product[]>(`/admin/products${suffix}`).then((r) => r.data);

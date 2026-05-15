@@ -6,6 +6,7 @@ import {
   ParseIntPipe,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from "@nestjs/common";
@@ -16,11 +17,13 @@ import type { AuthPayload } from "../auth/types";
 import { CreateProductDto } from "./dto/create-product.dto";
 import { UpdateProductDto } from "./dto/update-product.dto";
 import { CreateStockMovementDto } from "./dto/create-stock-movement.dto";
+import { ReplaceRecipeDto } from "./dto/replace-recipe.dto";
 import {
   InventoryActor,
   InventoryMovementsService,
 } from "./inventory-movements.service";
 import { ProductsService } from "./products.service";
+import { ProductRecipesService } from "./product-recipes.service";
 import { AuditLogService } from "../audit-log/audit-log.service";
 
 /**
@@ -42,6 +45,7 @@ export class AdminProductsController {
   constructor(
     private readonly products: ProductsService,
     private readonly movements: InventoryMovementsService,
+    private readonly recipes: ProductRecipesService,
     private readonly audit: AuditLogService,
   ) {}
 
@@ -51,10 +55,13 @@ export class AdminProductsController {
     @Query("include_inactive") includeInactive?: string,
     @Query("low_stock") lowStock?: string,
   ) {
+    // Default: ocultar inactivos. El frontend pasa explícitamente
+    // `include_inactive=true` cuando el operador selecciona el tab
+    // "Inactivos" para verlos. Esto evita contaminar la grilla
+    // principal con productos descontinuados.
     return this.products.findAllForAdmin({
       category: category?.trim() || undefined,
-      // default true: admin sees inactive items unless they explicitly opt out
-      includeInactive: includeInactive === "false" ? false : true,
+      includeInactive: includeInactive === "true",
       lowStockOnly: lowStock === "true",
     });
   }
@@ -188,6 +195,47 @@ export class AdminProductsController {
     return this.movements.listForProduct(id, {
       limit: limit ? Number.parseInt(limit, 10) : undefined,
     });
+  }
+
+  // ─── Recipes (composición de productos compuestos) ──────────────────────
+
+  /**
+   * Devuelve la receta del producto. `[]` = producto simple (sin
+   * receta); la venta descuenta de sí mismo.
+   */
+  @Get(":id/recipe")
+  getRecipe(@Param("id", ParseIntPipe) id: number) {
+    return this.recipes.getForProduct(id);
+  }
+
+  /**
+   * Reemplaza la receta entera. Idempotente, transaccional. Pasar
+   * `slots: []` borra la receta y deja el producto como simple.
+   */
+  @Put(":id/recipe")
+  async putRecipe(
+    @Param("id", ParseIntPipe) id: number,
+    @Body() dto: ReplaceRecipeDto,
+    @CurrentAuth() auth: AuthPayload,
+  ) {
+    const recipe = await this.recipes.replaceForProduct(id, dto.slots);
+    if (auth && auth.kind === "admin") {
+      const product = await this.products.findOneForAdmin(id).catch(() => null);
+      void this.audit.record({
+        kind: "product_updated",
+        actor_id: auth.sub,
+        actor_label: auth.name,
+        product_id: id,
+        product_name: product?.name ?? `producto #${id}`,
+        changes: {
+          recipe: {
+            from: "(replaced)",
+            to: `${recipe.length} slot(s), ${recipe.reduce((acc, s) => acc + s.options.length, 0)} option(s)`,
+          },
+        },
+      });
+    }
+    return recipe;
   }
 }
 

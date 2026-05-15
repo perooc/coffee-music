@@ -18,7 +18,14 @@ import { TableProjectionService } from "../table-projection/table-projection.ser
 type Tx = Prisma.TransactionClient;
 
 const ORDER_INCLUDE = {
-  order_items: { include: { product: true } },
+  order_items: {
+    include: {
+      product: true,
+      // Componentes físicos para productos compuestos. Vacío para
+      // simples. Usado por restoreStock para reposición exacta.
+      components: true,
+    },
+  },
   table_session: { select: { id: true, table_id: true, status: true } },
 } satisfies Prisma.OrderInclude;
 
@@ -165,14 +172,48 @@ export class OrdersService {
     return data;
   }
 
+  /**
+   * Repone stock al cancelar un Order. Para productos compuestos
+   * usa los OrderItemComponent reales (los componentes físicos que
+   * efectivamente salieron); para simples usa quantity del OrderItem.
+   * Esto garantiza reversión exacta — si una venta fue "3 aguila +
+   * 3 poker" en un armable, repone exactamente eso, no el default.
+   */
   private async restoreStock(
     tx: Tx,
-    items: Array<{ product_id: number; quantity: number }>,
+    items: Array<{
+      id: number;
+      product_id: number;
+      quantity: number;
+      components?: Array<{ component_product_id: number; quantity: number }>;
+    }>,
   ) {
+    // Recopilar componentes a reponer aparte para hacer un solo
+    // update por componente.
+    const totals = new Map<number, number>();
     for (const item of items) {
+      // Si llegó con components, es un compuesto: reponer
+      // exactamente esos componentes.
+      const fromComponents = item.components ?? [];
+      if (fromComponents.length > 0) {
+        for (const c of fromComponents) {
+          totals.set(
+            c.component_product_id,
+            (totals.get(c.component_product_id) ?? 0) + c.quantity,
+          );
+        }
+      } else {
+        // Producto simple: reponer al mismo product_id.
+        totals.set(
+          item.product_id,
+          (totals.get(item.product_id) ?? 0) + item.quantity,
+        );
+      }
+    }
+    for (const [productId, qty] of totals) {
       await tx.product.update({
-        where: { id: item.product_id },
-        data: { stock: { increment: item.quantity } },
+        where: { id: productId },
+        data: { stock: { increment: qty } },
       });
     }
   }

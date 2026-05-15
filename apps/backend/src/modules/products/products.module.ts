@@ -4,6 +4,8 @@ import { AdminProductsController } from "./admin-products.controller";
 import { InventoryMovementsService } from "./inventory-movements.service";
 import { ProductsController } from "./products.controller";
 import { ProductsService } from "./products.service";
+import { ProductRecipesService } from "./product-recipes.service";
+import { ProductAvailabilityService } from "./product-availability.service";
 import { AuditLogModule } from "../audit-log/audit-log.module";
 
 @Module({
@@ -13,7 +15,17 @@ import { AuditLogModule } from "../audit-log/audit-log.module";
     AdminProductsController,
     AdminInventoryMovementsController,
   ],
-  providers: [ProductsService, InventoryMovementsService],
-  exports: [ProductsService, InventoryMovementsService],
+  providers: [
+    ProductsService,
+    InventoryMovementsService,
+    ProductRecipesService,
+    ProductAvailabilityService,
+  ],
+  exports: [
+    ProductsService,
+    InventoryMovementsService,
+    ProductRecipesService,
+    ProductAvailabilityService,
+  ],
 })
 export class ProductsModule {}

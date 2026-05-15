@@ -3,21 +3,29 @@ import { Prisma, Product } from "@prisma/client";
 import { PrismaService } from "../../database/prisma.service";
 import { CreateProductDto } from "./dto/create-product.dto";
 import { UpdateProductDto } from "./dto/update-product.dto";
+import { ProductAvailabilityService } from "./product-availability.service";
 
 /**
  * Public-facing product is the same row but with computed flags so the
  * frontend never has to compare numbers itself. Naming follows the rest of
  * the API (`is_*` snake_case).
+ *
+ * `availability` se incluye sólo para productos compuestos (los que
+ * tienen receta). Para simples, el cliente cae al check `stock > 0`.
  */
 export type SerializedProduct = Omit<Product, "price"> & {
   price: number;
   is_low_stock: boolean;
   is_out_of_stock: boolean;
+  availability?: "available" | "out_of_stock";
 };
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly availability: ProductAvailabilityService,
+  ) {}
 
   // ─── Public read: cart / catalog ────────────────────────────────────────
   // Customers only see active products. Inactive products stay in the DB
@@ -27,10 +35,14 @@ export class ProductsService {
       where: { is_active: true },
       orderBy: [{ category: "asc" }, { name: "asc" }],
     });
-    return products.map((p) => this.serialize(p));
+    const availabilityMap = await this.availability.computeForProducts(
+      products.map((p) => p.id),
+    );
+    return products.map((p) => this.serialize(p, availabilityMap.get(p.id)));
   }
 
   // ─── Admin reads ────────────────────────────────────────────────────────
+  // Default: ocultar inactivos. `includeInactive=true` lo agrega.
   async findAllForAdmin(filter?: {
     category?: string;
     includeInactive?: boolean;
@@ -38,14 +50,21 @@ export class ProductsService {
   }): Promise<SerializedProduct[]> {
     const where: Prisma.ProductWhereInput = {};
     if (filter?.category) where.category = filter.category;
-    if (filter?.includeInactive === false) where.is_active = true;
+    // Default: false (ocultar inactivos). Sólo si el caller pasa
+    // explicitamente true los muestra.
+    if (filter?.includeInactive !== true) where.is_active = true;
 
     const products = await this.prisma.product.findMany({
       where,
       orderBy: [{ category: "asc" }, { name: "asc" }],
     });
 
-    const serialized = products.map((p) => this.serialize(p));
+    const availabilityMap = await this.availability.computeForProducts(
+      products.map((p) => p.id),
+    );
+    const serialized = products.map((p) =>
+      this.serialize(p, availabilityMap.get(p.id)),
+    );
     if (filter?.lowStockOnly) {
       return serialized.filter((p) => p.is_low_stock || p.is_out_of_stock);
     }
@@ -57,7 +76,10 @@ export class ProductsService {
     if (!product) {
       throw new NotFoundException(`Product ${id} not found`);
     }
-    return this.serialize(product);
+    const availabilityMap = await this.availability.computeForProducts([
+      product.id,
+    ]);
+    return this.serialize(product, availabilityMap.get(product.id));
   }
 
   // ─── Admin writes ───────────────────────────────────────────────────────
@@ -137,14 +159,21 @@ export class ProductsService {
     }
   }
 
-  serialize(product: Product): SerializedProduct {
+  serialize(
+    product: Product,
+    availability?: "available" | "out_of_stock",
+  ): SerializedProduct {
     const stock = product.stock;
     const threshold = product.low_stock_threshold;
-    return {
+    const base: SerializedProduct = {
       ...product,
       price: Number(product.price),
       is_low_stock: threshold > 0 && stock > 0 && stock <= threshold,
       is_out_of_stock: stock <= 0,
     };
+    if (availability !== undefined) {
+      base.availability = availability;
+    }
+    return base;
   }
 }

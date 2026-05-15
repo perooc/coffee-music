@@ -83,7 +83,10 @@ export default function AdminProductsPage() {
     setLoading(true);
     setError(null);
     try {
-      const list = await adminProductsApi.getAll();
+      // El filtro por activos/inactivos vive en el cliente (tabs).
+      // Pedimos TODO al backend para que la grilla pueda mostrar las
+      // dos vistas sin un round-trip extra al cambiar de tab.
+      const list = await adminProductsApi.getAll({ include_inactive: true });
       setProducts(list);
     } catch (e) {
       setError(getErrorMessage(e));
@@ -112,10 +115,15 @@ export default function AdminProductsPage() {
   // Catalog, tendríamos que duplicarlo aquí o exponerlo via ref — peor.
   const filtered = useMemo(() => {
     let list = products;
-    if (filter === "active") list = list.filter((p) => p.is_active);
+    // Tab "all" oculta inactivos por design (los inactivos viven en
+    // su propio tab para no contaminar la operación normal).
+    if (filter === "all") list = list.filter((p) => p.is_active);
+    else if (filter === "active") list = list.filter((p) => p.is_active);
     else if (filter === "inactive") list = list.filter((p) => !p.is_active);
     else if (filter === "low_stock")
-      list = list.filter((p) => p.is_low_stock || p.is_out_of_stock);
+      list = list.filter(
+        (p) => p.is_active && (p.is_low_stock || p.is_out_of_stock),
+      );
     if (categoryFilter) {
       list = list.filter((p) => p.category === categoryFilter);
     }
