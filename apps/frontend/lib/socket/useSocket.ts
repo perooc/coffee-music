@@ -173,7 +173,17 @@ export function useSocket(options: UseSocketOptions = {}) {
 
     // Join rooms on connect and re-join on reconnect.
     const joinRooms = () => {
+      // Debug visible para Eruda: queremos saber EXACTAMENTE qué
+      // rooms se intentan unir cada vez que el socket conecta.
+      console.log("[Socket] joinRooms()", {
+        sessionId,
+        staff,
+        tableId,
+        connected: s.connected,
+        socketId: s.id,
+      });
       if (sessionId !== undefined) {
+        console.log("[Socket] emit tableSession:join", sessionId);
         s.emit("tableSession:join", sessionId);
       }
       if (staff) {

@@ -6,6 +6,7 @@ import {
   UnifrakturCook,
 } from "next/font/google";
 import "./globals.css";
+import { DebugConsole } from "@/components/DebugConsole";
 
 const manrope = Manrope({
   variable: "--font-manrope",
@@ -58,7 +59,10 @@ export default function RootLayout({
       lang="es"
       className={`${manrope.variable} ${bebas.variable} ${oswald.variable} ${blackletter.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <DebugConsole />
+        {children}
+      </body>
     </html>
   );
 }

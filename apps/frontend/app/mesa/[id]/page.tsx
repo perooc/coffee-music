@@ -383,6 +383,13 @@ export default function MesaPage({
   );
   const handleOrderCreatedOrUpdated = useCallback(
     (o: Order) => {
+      console.log("[Mesa] order:created/updated arrived", {
+        order_id: o.id,
+        status: o.status,
+        from_session: o.table_session_id,
+        my_session: session?.id,
+        will_apply: session && o.table_session_id === session.id,
+      });
       if (session && o.table_session_id === session.id) upsertOrder(o);
     },
     [session, upsertOrder],
@@ -421,6 +428,13 @@ export default function MesaPage({
   );
   const handleOrderRequestUpdated = useCallback(
     (r: OrderRequest) => {
+      console.log("[Mesa] order-request:updated arrived", {
+        request_id: r.id,
+        status: r.status,
+        from_session: r.table_session_id,
+        my_session: session?.id,
+        will_apply: session && r.table_session_id === session.id,
+      });
       if (!session || r.table_session_id !== session.id) return;
       setMyRequests((prev) => upsertById(prev, r));
     },
