@@ -12,6 +12,16 @@ import {
 import { sanitizeText } from "../../../common/sanitize";
 
 export class CreateProductDto {
+  // Identificador estable y único. Opcional al crear desde la UI; si
+  // no viene el service lo autogenera del nombre. Necesario para que
+  // imports/seeds puedan upsertear sin depender del nombre exacto.
+  @IsOptional()
+  @Transform(({ value }) => sanitizeText(value))
+  @IsString()
+  @MinLength(2)
+  @MaxLength(80)
+  sku?: string;
+
   @Transform(({ value }) => sanitizeText(value))
   @IsString()
   @MinLength(2)

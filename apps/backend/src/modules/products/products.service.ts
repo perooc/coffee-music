@@ -62,8 +62,13 @@ export class ProductsService {
 
   // ─── Admin writes ───────────────────────────────────────────────────────
   async create(dto: CreateProductDto): Promise<SerializedProduct> {
+    // SKU es @unique + NOT NULL en la DB. Si el operador no manda uno
+    // (la UI actual no expone el campo), lo generamos desde un slug
+    // del nombre + timestamp corto para evitar colisiones.
+    const sku = dto.sku?.trim() || this.generateSku(dto.name);
     const product = await this.prisma.product.create({
       data: {
+        sku,
         name: dto.name,
         description: dto.description ?? null,
         price: dto.price,
@@ -74,6 +79,18 @@ export class ProductsService {
       },
     });
     return this.serialize(product);
+  }
+
+  private generateSku(name: string): string {
+    const slug = name
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[̀-ͯ]/g, "")
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_|_$/g, "")
+      .slice(0, 40);
+    const suffix = Date.now().toString(36);
+    return `${slug || "product"}_${suffix}`;
   }
 
   /**

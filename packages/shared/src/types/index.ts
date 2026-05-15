@@ -157,6 +157,9 @@ export interface PlaybackState {
 
 export interface Product {
   id: number;
+  // Identificador estable e independiente del nombre. Útil para
+  // integraciones, imports y seeds. Siempre presente en respuestas.
+  sku: string;
   name: string;
   description: string | null;
   price: number;
@@ -169,6 +172,11 @@ export interface Product {
   // Computed by the API; clients should never recompute themselves.
   is_low_stock?: boolean;
   is_out_of_stock?: boolean;
+  // Computed by the API for productos compuestos. "available" si las
+  // cantidades de componentes alcanzan al menos para 1 unidad; en
+  // caso contrario "out_of_stock". Para productos simples puede
+  // omitirse — el frontend cae a `stock > 0`.
+  availability?: "available" | "out_of_stock";
 }
 
 export type InventoryMovementType =

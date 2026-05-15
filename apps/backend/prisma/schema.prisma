@@ -362,6 +362,12 @@ model BarAccessCode {
 
 model Product {
   id                    Int                  @id @default(autoincrement())
+  // Stable identifier independent of name changes. Used by the seed
+  // and any future import/integration to upsert without breaking when
+  // the operator renames a product. Required + unique — every product
+  // needs identity. New products created from the admin UI also get
+  // an SKU (auto-generated if the operator doesn't pick one).
+  sku                   String               @unique
   name                  String
   description           String?
   price                 Decimal              @db.Decimal(10, 2)
@@ -375,6 +381,94 @@ model Product {
   updated_at            DateTime             @updatedAt
   order_items           OrderItem[]
   inventory_movements   InventoryMovement[]
+  // Recipe slots THIS product owns (i.e. this is a composite).
+  recipe_slots          ProductRecipeSlot[]
+  // Reverse side of ProductRecipeOption.component: this product is a
+  // component of recipes. Used to forbid hard-deleting components.
+  component_of_options  ProductRecipeOption[] @relation("ComponentOf")
+  // Reverse side of OrderItemComponent.component_product.
+  component_consumption OrderItemComponent[]  @relation("ComponentConsumption")
+}
+
+/**
+ * "Slot" de una receta: un grupo de unidades del compuesto que se
+ * llenan con uno o más componentes. Ejemplos:
+ *   - Cubetazo Aguila Negra → 1 slot de 6 unidades, 1 opción (Aguila).
+ *   - Cubetazo aguila/poker → 1 slot de 6 unidades, 2 opciones.
+ *   - Combo aguila + nectar → 2 slots: cervezas (6) + licor (1).
+ *
+ * `quantity` es el TOTAL a llenar entre todas las opciones del slot
+ * por cada unidad vendida del compuesto. Cuando se valida la
+ * composición, la suma de quantity por opción debe ser == slot.quantity.
+ */
+model ProductRecipeSlot {
+  id          Int                   @id @default(autoincrement())
+  product_id  Int
+  label       String
+  quantity    Int
+  // Orden visual en la UI. No es identificador; el id manda.
+  position    Int                   @default(0)
+  created_at  DateTime              @default(now())
+  updated_at  DateTime              @updatedAt
+  product     Product               @relation(fields: [product_id], references: [id], onDelete: Cascade)
+  options     ProductRecipeOption[]
+
+  @@index([product_id])
+}
+
+/**
+ * Componentes posibles para llenar un slot. `default_quantity` es la
+ * sugerencia inicial cuando el operador/cliente abre el selector. La
+ * cantidad REAL al vender la decide el flow de la venta; si no se
+ * envía nada, se usa el default.
+ *
+ * Para compuestos FIJOS: 1 opción cuyo default == slot.quantity.
+ * Para compuestos ARMABLES: 2+ opciones cuyos defaults suman
+ *   slot.quantity (lo enforce el servicio al guardar la receta).
+ */
+model ProductRecipeOption {
+  id                Int                @id @default(autoincrement())
+  slot_id           Int
+  component_id      Int
+  default_quantity  Int
+  position          Int                @default(0)
+  created_at        DateTime           @default(now())
+  updated_at        DateTime           @updatedAt
+  slot              ProductRecipeSlot  @relation(fields: [slot_id], references: [id], onDelete: Cascade)
+  component         Product            @relation("ComponentOf", fields: [component_id], references: [id], onDelete: Restrict)
+
+  // Una opción única por (slot, componente). No tiene sentido tener
+  // "Aguila" listada dos veces como opción del mismo slot.
+  @@unique([slot_id, component_id])
+  @@index([component_id])
+}
+
+/**
+ * Registro inmutable de los componentes físicos descontados al
+ * aceptar un OrderItem que es de un producto compuesto. Una fila
+ * por componente, por unidad. Permite:
+ *   - Reversión exacta al cancelar (reponer lo que efectivamente
+ *     salió, no el default).
+ *   - Analytics reales por SKU físico ("cuántas aguilas se sirvieron
+ *     hoy entre individuales y cubetazos").
+ *   - Auditoría legal de qué se descontó.
+ *
+ * `unit_index` permite distinguir cuál de las N unidades del item
+ * tuvo qué composición (importante para cubetazos armables donde
+ * cada unidad puede ser distinta).
+ */
+model OrderItemComponent {
+  id                   Int       @id @default(autoincrement())
+  order_item_id        Int
+  component_product_id Int
+  quantity             Int
+  unit_index           Int
+  created_at           DateTime  @default(now())
+  order_item           OrderItem @relation(fields: [order_item_id], references: [id], onDelete: Cascade)
+  component_product    Product   @relation("ComponentConsumption", fields: [component_product_id], references: [id], onDelete: Restrict)
+
+  @@index([order_item_id])
+  @@index([component_product_id])
 }
 
 /**
@@ -440,14 +534,17 @@ model Order {
 }
 
 model OrderItem {
-  id         Int      @id @default(autoincrement())
+  id         Int                 @id @default(autoincrement())
   order_id   Int
   product_id Int
   quantity   Int
-  unit_price Decimal  @db.Decimal(10, 2)
-  created_at DateTime @default(now())
-  order      Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  product    Product  @relation(fields: [product_id], references: [id], onDelete: Restrict)
+  unit_price Decimal              @db.Decimal(10, 2)
+  created_at DateTime             @default(now())
+  order      Order                @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  product    Product              @relation(fields: [product_id], references: [id], onDelete: Restrict)
+  // Componentes físicos descontados (sólo presente cuando product es
+  // un compuesto). Vacío para productos simples.
+  components OrderItemComponent[]
 
   @@index([order_id])
   @@index([product_id])
