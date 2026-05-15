@@ -5,18 +5,21 @@ import { PrismaService } from "../../database/prisma.service";
  * Calcula disponibilidad binaria de productos compuestos.
  *
  * En V1 sólo devolvemos "available" / "out_of_stock", sin números.
- * Regla:
- *   - Un compuesto está "available" si existe AL MENOS UNA combinación
- *     válida que satisfaga todos los slots dado el stock actual de los
- *     componentes.
- *   - Un slot está "satisfacible" si la suma de stocks de sus opciones
- *     es >= slot.quantity (las armables permiten redistribuir; las
- *     fijas tienen 1 sola opción y caen al mismo caso).
  *
- * No miramos `is_active` del componente porque desactivado = "no se
- * puede usar" en la práctica; el operador puede haber sacado uno y
- * el cubetazo sigue armable con el otro. Si todas las opciones de un
- * slot están inactivas, eso ya lo marca el stock=0 implícito.
+ * Regla ESTRICTA (decisión operativa del bar):
+ *   - Un compuesto está "available" sí y sólo sí TODAS las opciones de
+ *     TODOS sus slots tienen al menos 1 unidad de stock (Y además stock
+ *     suficiente para cubrir cualquier reparto que el cliente intente).
+ *   - Si CUALQUIER componente listado en una opción tiene stock 0, el
+ *     producto compuesto queda "out_of_stock" — aunque otras opciones
+ *     del mismo slot tengan stock suficiente.
+ *
+ * Razón: el cliente espera consistencia. Un cubetazo "mix aguila/poker"
+ * con 0 poker está físicamente vendible (6 aguila), pero la promesa
+ * del producto es "puede haber poker". Si bloqueamos al mostrar el
+ * producto, el cliente no pasa por la frustración de elegir 4+2 y que
+ * el server rechace al aceptar. Tradeoff: vendemos menos cuando un
+ * componente está agotado. Aceptable.
  *
  * Performance: una sola query a Prisma trae slots + opciones + stock
  * de cada componente; el resto es agregación en memoria. Costo O(n)
@@ -59,17 +62,22 @@ export class ProductAvailabilityService {
 
     const result = new Map<number, "available" | "out_of_stock">();
     for (const [productId, productSlots] of slotsByProduct) {
-      const allSlotsSatisfiable = productSlots.every((slot) => {
+      // Regla estricta: cada componente listado debe tener stock > 0.
+      // Si CUALQUIER opción de CUALQUIER slot tiene stock 0, el
+      // compuesto queda agotado. Y además la suma de stocks por slot
+      // debe cubrir slot.quantity (chequeo redundante pero explícito).
+      const allOk = productSlots.every((slot) => {
+        const everyOptionHasStock = slot.options.every(
+          (opt) => (opt.component?.stock ?? 0) > 0,
+        );
+        if (!everyOptionHasStock) return false;
         const totalAvailable = slot.options.reduce(
           (acc, opt) => acc + (opt.component?.stock ?? 0),
           0,
         );
         return totalAvailable >= slot.quantity;
       });
-      result.set(
-        productId,
-        allSlotsSatisfiable ? "available" : "out_of_stock",
-      );
+      result.set(productId, allOk ? "available" : "out_of_stock");
     }
     return result;
   }
