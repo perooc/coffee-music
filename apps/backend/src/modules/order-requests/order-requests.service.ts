@@ -892,10 +892,40 @@ export class OrderRequestsService {
     }
     return raw.map((entry) => {
       const obj = entry as Record<string, unknown>;
-      return {
+      const result: RequestItemInput = {
         product_id: Number(obj.product_id),
-        quantity: Number(obj.quantity),
       };
+      // `quantity` puede estar ausente cuando el item es un compuesto
+      // armable persistido con `units`. Solo lo seteamos si vino.
+      if (typeof obj.quantity === "number" && Number.isFinite(obj.quantity)) {
+        result.quantity = obj.quantity;
+      }
+      if (Array.isArray(obj.units)) {
+        result.units = obj.units.map((u) => {
+          const unit = u as Record<string, unknown>;
+          if (Array.isArray(unit.composition)) {
+            return {
+              composition: unit.composition.map((c) => {
+                const slot = c as Record<string, unknown>;
+                return {
+                  slot_id: Number(slot.slot_id),
+                  options: Array.isArray(slot.options)
+                    ? slot.options.map((o) => {
+                        const opt = o as Record<string, unknown>;
+                        return {
+                          option_id: Number(opt.option_id),
+                          quantity: Number(opt.quantity),
+                        };
+                      })
+                    : [],
+                };
+              }),
+            };
+          }
+          return {};
+        });
+      }
+      return result;
     });
   }
 
