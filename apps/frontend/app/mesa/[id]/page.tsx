@@ -602,18 +602,24 @@ export default function MesaPage({
       const created = await tableSessionsApi.open(tableId);
       // Persist the session token BEFORE marking the session as live so that
       // - subsequent customerApi requests carry the bearer
-      // - the socket's auth callback (re-)resolves to a session token and
-      //   auto-joins tableSession:{id} on reconnect.
+      // - the socket's auth callback (re-)resolves to a session token
+      //   when reconectamos abajo.
       setSessionToken(created.session_token);
-      // Force the shared socket to handshake again so the server sees
-      // the new auth (and so tableSession:join succeeds). Without this
-      // a second device that connected anonymously stays anonymous and
-      // the backend silently denies its room joins, leading to "events
-      // never arrive until I refresh".
-      reconnectSocketWithFreshAuth();
       const { session_token: _ignored, ...session } = created;
       void _ignored;
+      // ORDEN CRÍTICO: primero setSession(...) para que useSocket
+      // observe el sessionId nuevo y dispare un joinRooms del room
+      // `tableSession:{id}`. Recién después reconectamos el socket
+      // para que el handshake lleve la auth fresca. Antes hacíamos
+      // reconnect → setSession y el `connect` event llegaba antes
+      // de que useSocket conociera el sessionId, dejando al cliente
+      // fuera del room — los eventos del admin nunca llegaban.
       setSession(session);
+      // Forzar reconnect después del setState. Doble propósito:
+      //   1) Refrescar la auth (de anonymous → session token).
+      //   2) Disparar `connect` que vuelve a invocar joinRooms con
+      //      el sessionId ya seteado.
+      reconnectSocketWithFreshAuth();
     } catch (err) {
       const status = (err as { response?: { status?: number } })?.response
         ?.status;

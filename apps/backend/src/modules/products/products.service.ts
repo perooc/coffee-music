@@ -171,8 +171,19 @@ export class ProductsService {
       is_low_stock: threshold > 0 && stock > 0 && stock <= threshold,
       is_out_of_stock: stock <= 0,
     };
+    // Para productos compuestos, los flags `is_*_stock` calculados
+    // arriba miran el stock propio del compuesto — que para los
+    // compuestos no significa nada (siempre suele estar fijo en un
+    // valor grande). Lo que importa es la disponibilidad real
+    // (derivada del stock de los componentes). Sobrescribimos para
+    // que la grilla del admin y los reports reflejen la verdad.
     if (availability !== undefined) {
       base.availability = availability;
+      base.is_out_of_stock = availability === "out_of_stock";
+      // Compuestos no tienen "low stock" propio. Si todos los
+      // componentes están bajos pero presentes, el agregado es
+      // tema operativo aparte; no lo mezclamos en este flag.
+      base.is_low_stock = false;
     }
     return base;
   }
