@@ -22,7 +22,7 @@ import { ReverseExtraIncomeDto } from "./dto/reverse-extra-income.dto";
  * mueve a tabla con timestamp de vigencia.
  */
 const RESTROOM_PRICES = {
-  male: 1000,
+  male: 2000,
   female: 2000,
 } as const satisfies Record<"male" | "female", number>;
 

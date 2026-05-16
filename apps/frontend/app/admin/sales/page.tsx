@@ -3397,7 +3397,7 @@ function ExtrasTab({ range }: { range: DateRange }) {
               label="Hombre"
               count={extras.restroom.male.count}
               revenue={extras.restroom.male.revenue}
-              priceHint="$1.000 / uso"
+              priceHint="$2.000 / uso"
             />
             <RestroomCard
               label="Mujer"
@@ -3806,11 +3806,25 @@ function LuggageActiveRow({
               Marcar pagado
             </button>
           )}
+          {/*
+            Entrega bloqueada cuando la maleta está pending: el staff
+            tiene que marcarla pagada primero. Esto evita que una maleta
+            salga del bar sin cobrar (la ficha quedaba libre y la
+            plata jamás entraba). Si excepcionalmente hay que entregar
+            sin cobrar (cortesía, problema operativo), el camino es
+            reportar incidente con razón — que también libera la ficha
+            pero deja trazabilidad explícita.
+          */}
           <button
             type="button"
             onClick={onDeliver}
-            disabled={busy}
-            style={smallActionBtn(C.gold)}
+            disabled={busy || !paid}
+            title={
+              !paid
+                ? "Marca como pagado primero o usa 'Incidente' si hay un caso especial"
+                : undefined
+            }
+            style={smallActionBtn(C.gold, busy || !paid)}
           >
             Entregar
           </button>
@@ -3920,19 +3934,23 @@ function LuggageHistoryRow({ ticket }: { ticket: LuggageTicketApi }) {
   );
 }
 
-function smallActionBtn(color: string): React.CSSProperties {
+function smallActionBtn(
+  color: string,
+  disabled = false,
+): React.CSSProperties {
   return {
     padding: "6px 10px",
-    border: `1px solid ${color}`,
+    border: `1px solid ${disabled ? C.sand : color}`,
     background: "transparent",
-    color,
+    color: disabled ? C.mute : color,
     borderRadius: 999,
     fontFamily: FONT_MONO,
     fontSize: 10,
     letterSpacing: 1.2,
     textTransform: "uppercase",
     fontWeight: 700,
-    cursor: "pointer",
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.55 : 1,
   };
 }
 

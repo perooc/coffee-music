@@ -217,7 +217,7 @@ export function ExtrasDock() {
               <div style={{ display: "flex", gap: 8 }}>
                 <QuickChargeButton
                   label="Baño H"
-                  price={1000}
+                  price={2000}
                   count={extras?.restroom.male.count ?? 0}
                   busy={busy === "male"}
                   onClick={() => void charge("male")}

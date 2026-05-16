@@ -310,25 +310,7 @@ export function LuggageNewModal({
                 {fmt(LUGGAGE_PRICE)}
               </div>
             </div>
-            <label
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                fontFamily: FONT_UI,
-                fontSize: 13,
-                color: C.ink,
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={paid}
-                onChange={(e) => setPaid(e.target.checked)}
-                style={{ width: 18, height: 18 }}
-              />
-              Cobrado al ingresar
-            </label>
+            <PaymentToggle paid={paid} onChange={setPaid} />
           </section>
 
           <section>
@@ -447,4 +429,75 @@ function inputStyle(): React.CSSProperties {
     fontSize: 14,
     outline: "none",
   };
+}
+
+/**
+ * Toggle de pago en estilo del bar (no el checkbox nativo azul de Chrome).
+ * Cuando está `paid`, el track va en olive (verde "ok") con label "Pagado";
+ * cuando no, va en sand con label "Pendiente" en terracotta para llamar
+ * la atención del staff (es el caso que requiere acción posterior).
+ *
+ * Botón nativo con role implícito de switch — accesible por teclado y
+ * lectores de pantalla.
+ */
+function PaymentToggle({
+  paid,
+  onChange,
+}: {
+  paid: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={paid}
+      onClick={() => onChange(!paid)}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "6px 6px 6px 14px",
+        border: `1px solid ${paid ? C.olive : C.terracotta}`,
+        background: paid ? `${C.olive}11` : `${C.terracotta}11`,
+        borderRadius: 999,
+        cursor: "pointer",
+        fontFamily: FONT_UI,
+        fontSize: 12,
+        fontWeight: 700,
+        letterSpacing: 0.3,
+        color: paid ? C.olive : C.terracotta,
+      }}
+    >
+      <span style={{ textTransform: "uppercase", letterSpacing: 1.5 }}>
+        {paid ? "Pagado" : "Pendiente"}
+      </span>
+      <span
+        aria-hidden
+        style={{
+          position: "relative",
+          width: 38,
+          height: 22,
+          background: paid ? C.olive : C.sand,
+          borderRadius: 999,
+          transition: "background 180ms ease",
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            position: "absolute",
+            top: 2,
+            left: paid ? 18 : 2,
+            width: 18,
+            height: 18,
+            background: "#FFFDF8",
+            borderRadius: "50%",
+            boxShadow: "0 2px 4px rgba(43,29,20,0.25)",
+            transition: "left 180ms ease",
+          }}
+        />
+      </span>
+    </button>
+  );
 }

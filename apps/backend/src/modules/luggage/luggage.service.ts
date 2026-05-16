@@ -148,8 +148,20 @@ export class LuggageService {
 
   /**
    * Entregar: active → delivered. La ficha vuelve a estar disponible
-   * (porque el partial unique index solo aplica a status=active). Si
-   * la maleta ya no está activa, ConflictException.
+   * (porque el partial unique index solo aplica a status=active).
+   *
+   * Reglas de negocio:
+   *   - Solo se puede entregar si está active. Si ya está delivered o
+   *     incident, ConflictException.
+   *   - Solo se puede entregar si está PAGADA. Si está pending,
+   *     ConflictException con código `LUGGAGE_PAYMENT_PENDING`. Esto
+   *     cierra el agujero de "maleta sale sin cobrar". Para los casos
+   *     de cortesía / problema operativo donde no se cobra, el camino
+   *     es `incident` con razón.
+   *
+   * El frontend ya deshabilita el botón, pero blindamos el backend para
+   * que cualquier integración futura (script, API directa) tampoco pueda
+   * saltarse esta regla.
    */
   async deliver(
     id: number,
@@ -165,6 +177,13 @@ export class LuggageService {
       throw new ConflictException({
         message: `LuggageTicket ${id} is not active (status=${ticket.status})`,
         code: "LUGGAGE_NOT_ACTIVE",
+      });
+    }
+    if (ticket.payment_status !== LuggagePaymentStatus.paid) {
+      throw new ConflictException({
+        message:
+          "No se puede entregar una maleta con pago pendiente. Marca como pagada primero, o reporta incidente si es un caso especial.",
+        code: "LUGGAGE_PAYMENT_PENDING",
       });
     }
     const result = await this.prisma.luggageTicket.updateMany({
