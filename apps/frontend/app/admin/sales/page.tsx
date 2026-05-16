@@ -5,10 +5,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   salesInsightsApi,
+  extraIncomeApi,
+  luggageApi,
   type ClosedSessionApi,
   type ClosedSessionLineApi,
   type ClosedSessionLineUnitApi,
   type ClosedSessionsResponse,
+  type ExtraIncomeApi,
+  type ExtraIncomeSummary,
+  type LuggageSummary,
+  type LuggageTicketApi,
   type ProductMetricsResponse,
   type ProductMetricsRowApi,
   type ProductSalesSummary,
@@ -52,9 +58,15 @@ const DEFAULT_RANGE: DateRange = {
   days: 1,
 };
 
-type TabKey = "summary" | "detail" | "products";
+type TabKey = "summary" | "detail" | "products" | "extras";
 
 const TAB_STORAGE_KEY = "admin_sales_tab";
+
+function isValidTab(v: unknown): v is TabKey {
+  return (
+    v === "summary" || v === "detail" || v === "products" || v === "extras"
+  );
+}
 
 export default function AdminSalesPage() {
   const [range, setRange] = useState<DateRange>(DEFAULT_RANGE);
@@ -62,14 +74,15 @@ export default function AdminSalesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Persistimos la última pestaña en sessionStorage para que un refresh
-  // del navegador devuelva al operador al mismo sitio. No usamos query
-  // string para evitar reload del componente al cambiar de tab.
+  // del navegador devuelva al operador al mismo sitio. Al inicio
+  // chequeamos la query string `?tab=` para que enlaces externos
+  // (ExtrasDock) puedan deep-linkear al tab correcto.
   const [tab, setTab] = useState<TabKey>(() => {
     if (typeof window === "undefined") return "summary";
+    const qs = new URLSearchParams(window.location.search).get("tab");
+    if (isValidTab(qs)) return qs;
     const stored = window.sessionStorage.getItem(TAB_STORAGE_KEY);
-    if (stored === "summary" || stored === "detail" || stored === "products") {
-      return stored;
-    }
+    if (isValidTab(stored)) return stored;
     return "summary";
   });
   useEffect(() => {
@@ -380,6 +393,7 @@ export default function AdminSalesPage() {
 
       {tab === "detail" && <DetailTab range={range} liveTick={liveJustRefreshed} />}
       {tab === "products" && <ProductsTab range={range} liveTick={liveJustRefreshed} />}
+      {tab === "extras" && <ExtrasTab range={range} />}
     </main>
     </>
   );
@@ -397,6 +411,11 @@ function TabBar({
     { key: "summary", label: "Resumen", hint: "KPIs, charts y rankings" },
     { key: "detail", label: "Detalle", hint: "Cuentas cerradas con líneas" },
     { key: "products", label: "Productos", hint: "Catálogo con métricas" },
+    {
+      key: "extras",
+      label: "Extras",
+      hint: "Ingresos no operativos: baño y guardarropa",
+    },
   ];
   return (
     <nav
@@ -3242,4 +3261,959 @@ function pagerBtn(disabled: boolean): React.CSSProperties {
     borderRadius: 999,
     cursor: disabled ? "not-allowed" : "pointer",
   };
+}
+
+// ─── Tab "Extras" ────────────────────────────────────────────────────────────
+// Reporte de ingresos no operacionales: baño + maletas. Tres secciones:
+//   1. KPIs combinados del rango.
+//   2. Servicio de baño con historial + reverso.
+//   3. Maletas activas con entregar / marcar pagado / incidente.
+//   4. Historial reciente de maletas.
+function ExtrasTab({ range }: { range: DateRange }) {
+  const [extras, setExtras] = useState<ExtraIncomeSummary | null>(null);
+  const [luggage, setLuggage] = useState<LuggageSummary | null>(null);
+  const [extrasList, setExtrasList] = useState<ExtraIncomeApi[]>([]);
+  const [active, setActive] = useState<LuggageTicketApi[]>([]);
+  const [recentLuggage, setRecentLuggage] = useState<LuggageTicketApi[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [reverseTarget, setReverseTarget] = useState<ExtraIncomeApi | null>(
+    null,
+  );
+  const [incidentTarget, setIncidentTarget] = useState<LuggageTicketApi | null>(
+    null,
+  );
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = rangeToIsoBounds(range);
+      const [eSum, lSum, eList, activeRows, recentRows] = await Promise.all([
+        extraIncomeApi.summary(params),
+        luggageApi.summary(params),
+        extraIncomeApi.list({ type: "restroom", ...params, limit: 200 }),
+        luggageApi.list({ status: "active", limit: 100 }),
+        luggageApi.list({ limit: 50 }),
+      ]);
+      setExtras(eSum);
+      setLuggage(lSum);
+      setExtrasList(eList);
+      setActive(activeRows);
+      setRecentLuggage(recentRows);
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [range]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const onDeliver = async (t: LuggageTicketApi) => {
+    if (busyId) return;
+    setBusyId(t.id);
+    try {
+      await luggageApi.deliver(t.id);
+      void load();
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const onMarkPaid = async (t: LuggageTicketApi) => {
+    if (busyId) return;
+    setBusyId(t.id);
+    try {
+      await luggageApi.updatePayment(t.id, "paid");
+      void load();
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (loading && !extras) return <LoadingBlock />;
+  if (error) return <ErrorBlock text={error} />;
+
+  const totalExtras =
+    (extras?.restroom.total.revenue ?? 0) + (luggage?.luggage.revenue ?? 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: 10,
+        }}
+      >
+        <MiniStat
+          label="Total extras"
+          value={fmt(totalExtras)}
+          hint="Baño + Maletas"
+        />
+        <MiniStat
+          label="Baños"
+          value={String(extras?.restroom.total.count ?? 0)}
+          hint={fmt(extras?.restroom.total.revenue ?? 0)}
+        />
+        <MiniStat
+          label="Maletas cobradas"
+          value={String(luggage?.luggage.count ?? 0)}
+          hint={fmt(luggage?.luggage.revenue ?? 0)}
+        />
+        <MiniStat
+          label="Maletas activas"
+          value={String(luggage?.luggage.active_count ?? 0)}
+          hint={
+            luggage && luggage.luggage.pending_count > 0
+              ? `${luggage.luggage.pending_count} sin pagar`
+              : undefined
+          }
+          tone={
+            luggage && luggage.luggage.incident_count > 0 ? "alert" : "neutral"
+          }
+        />
+      </div>
+
+      {extras && (
+        <Panel title="Servicio de baño">
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: 12,
+              marginBottom: 12,
+            }}
+          >
+            <RestroomCard
+              label="Hombre"
+              count={extras.restroom.male.count}
+              revenue={extras.restroom.male.revenue}
+              priceHint="$1.000 / uso"
+            />
+            <RestroomCard
+              label="Mujer"
+              count={extras.restroom.female.count}
+              revenue={extras.restroom.female.revenue}
+              priceHint="$2.000 / uso"
+            />
+          </div>
+
+          {extrasList.length === 0 ? (
+            <Empty text="Sin registros en el rango" />
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontFamily: FONT_UI,
+                  fontSize: 13,
+                }}
+              >
+                <thead>
+                  <tr>
+                    <th style={{ ...thBase(), textAlign: "left" }}>Hora</th>
+                    <th style={{ ...thBase(), textAlign: "left" }}>Tipo</th>
+                    <th style={{ ...thBase(), textAlign: "left" }}>Notas</th>
+                    <th style={{ ...thBase(), textAlign: "right" }}>Monto</th>
+                    <th style={{ ...thBase(), textAlign: "center" }}>Estado</th>
+                    <th style={{ ...thBase(), textAlign: "right" }}>—</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {extrasList.map((row) => (
+                    <ExtraIncomeRow
+                      key={row.id}
+                      row={row}
+                      onReverse={() => setReverseTarget(row)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      <Panel title={`Maletas activas (${active.length})`}>
+        {active.length === 0 ? (
+          <Empty text="Sin maletas activas" />
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontFamily: FONT_UI,
+                fontSize: 13,
+              }}
+            >
+              <thead>
+                <tr>
+                  <th style={{ ...thBase(), textAlign: "center" }}>Ficha</th>
+                  <th style={{ ...thBase(), textAlign: "left" }}>Cliente</th>
+                  <th style={{ ...thBase(), textAlign: "left" }}>Teléfono</th>
+                  <th style={{ ...thBase(), textAlign: "left" }}>Notas</th>
+                  <th style={{ ...thBase(), textAlign: "center" }}>Pago</th>
+                  <th style={{ ...thBase(), textAlign: "right" }}>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {active.map((t) => (
+                  <LuggageActiveRow
+                    key={t.id}
+                    ticket={t}
+                    busy={busyId === t.id}
+                    onDeliver={() => void onDeliver(t)}
+                    onMarkPaid={() => void onMarkPaid(t)}
+                    onIncident={() => setIncidentTarget(t)}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      <Panel title="Historial reciente de maletas">
+        {recentLuggage.length === 0 ? (
+          <Empty text="Sin maletas registradas" />
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontFamily: FONT_UI,
+                fontSize: 13,
+              }}
+            >
+              <thead>
+                <tr>
+                  <th style={{ ...thBase(), textAlign: "left" }}>Cliente</th>
+                  <th style={{ ...thBase(), textAlign: "center" }}>Ficha</th>
+                  <th style={{ ...thBase(), textAlign: "left" }}>Ingreso</th>
+                  <th style={{ ...thBase(), textAlign: "left" }}>Salida</th>
+                  <th style={{ ...thBase(), textAlign: "center" }}>Estado</th>
+                  <th style={{ ...thBase(), textAlign: "right" }}>Monto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentLuggage.map((t) => (
+                  <LuggageHistoryRow key={t.id} ticket={t} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      {reverseTarget && (
+        <ReverseExtraIncomeModal
+          target={reverseTarget}
+          onCancel={() => setReverseTarget(null)}
+          onDone={() => {
+            setReverseTarget(null);
+            void load();
+          }}
+        />
+      )}
+      {incidentTarget && (
+        <LuggageIncidentModal
+          ticket={incidentTarget}
+          onCancel={() => setIncidentTarget(null)}
+          onDone={() => {
+            setIncidentTarget(null);
+            void load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function RestroomCard({
+  label,
+  count,
+  revenue,
+  priceHint,
+}: {
+  label: string;
+  count: number;
+  revenue: number;
+  priceHint: string;
+}) {
+  return (
+    <div
+      style={{
+        background: C.cream,
+        border: `1px solid ${C.sand}`,
+        borderRadius: 12,
+        padding: "14px 16px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+      }}
+    >
+      <span
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          letterSpacing: 2,
+          color: C.mute,
+          textTransform: "uppercase",
+          fontWeight: 700,
+        }}
+      >
+        Baño {label} · {priceHint}
+      </span>
+      <span
+        style={{
+          fontFamily: FONT_DISPLAY,
+          fontSize: 22,
+          color: C.ink,
+          letterSpacing: 0.5,
+        }}
+      >
+        {count} usos
+      </span>
+      <span
+        style={{
+          fontFamily: FONT_UI,
+          fontSize: 14,
+          color: C.gold,
+          fontWeight: 600,
+        }}
+      >
+        {fmt(revenue)}
+      </span>
+    </div>
+  );
+}
+
+function ExtraIncomeRow({
+  row,
+  onReverse,
+}: {
+  row: ExtraIncomeApi;
+  onReverse: () => void;
+}) {
+  const isReversed = row.status === "reversed";
+  const time = new Date(row.created_at);
+  return (
+    <tr
+      style={{
+        borderBottom: `1px solid ${C.sand}`,
+        opacity: isReversed ? 0.55 : 1,
+      }}
+    >
+      <td
+        style={{
+          padding: "8px 10px",
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          color: C.cacao,
+        }}
+      >
+        {formatHm(time)}
+      </td>
+      <td style={{ padding: "8px 10px" }}>
+        {row.subtype === "male" ? "Baño H" : "Baño M"}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          fontFamily: FONT_UI,
+          fontSize: 12,
+          color: C.mute,
+        }}
+      >
+        {row.notes ?? "—"}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          textAlign: "right",
+          fontFamily: FONT_UI,
+          color: isReversed ? C.mute : C.gold,
+          fontWeight: 600,
+          textDecoration: isReversed ? "line-through" : "none",
+        }}
+      >
+        {fmt(row.total_amount)}
+      </td>
+      <td style={{ padding: "8px 10px", textAlign: "center" }}>
+        {isReversed ? (
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              color: C.terracotta,
+              background: C.terracottaSoft,
+              padding: "2px 8px",
+              borderRadius: 999,
+              letterSpacing: 1.2,
+              textTransform: "uppercase",
+              fontWeight: 700,
+            }}
+            title={row.reverse_reason ?? undefined}
+          >
+            Revertido
+          </span>
+        ) : (
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 9,
+              color: C.olive,
+              letterSpacing: 1.2,
+              textTransform: "uppercase",
+              fontWeight: 700,
+            }}
+          >
+            Activo
+          </span>
+        )}
+      </td>
+      <td style={{ padding: "8px 10px", textAlign: "right" }}>
+        {!isReversed && (
+          <button
+            type="button"
+            onClick={onReverse}
+            style={{
+              padding: "6px 12px",
+              border: `1px solid ${C.terracotta}`,
+              background: "transparent",
+              color: C.terracotta,
+              borderRadius: 999,
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              letterSpacing: 1.5,
+              textTransform: "uppercase",
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            Reversar
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function LuggageActiveRow({
+  ticket,
+  busy,
+  onDeliver,
+  onMarkPaid,
+  onIncident,
+}: {
+  ticket: LuggageTicketApi;
+  busy: boolean;
+  onDeliver: () => void;
+  onMarkPaid: () => void;
+  onIncident: () => void;
+}) {
+  const paid = ticket.payment_status === "paid";
+  return (
+    <tr style={{ borderBottom: `1px solid ${C.sand}` }}>
+      <td
+        style={{
+          padding: "10px",
+          textAlign: "center",
+          fontFamily: FONT_DISPLAY,
+          fontSize: 18,
+          color: C.gold,
+          letterSpacing: 0.5,
+        }}
+      >
+        {ticket.ticket_number}
+      </td>
+      <td style={{ padding: "10px" }}>
+        <div
+          style={{
+            fontFamily: FONT_UI,
+            fontWeight: 600,
+            color: C.ink,
+          }}
+        >
+          {ticket.customer_first_name} {ticket.customer_last_name}
+        </div>
+      </td>
+      <td
+        style={{
+          padding: "10px",
+          fontFamily: FONT_MONO,
+          fontSize: 12,
+          color: C.cacao,
+        }}
+      >
+        {ticket.customer_phone}
+      </td>
+      <td
+        style={{
+          padding: "10px",
+          fontFamily: FONT_UI,
+          fontSize: 12,
+          color: C.mute,
+        }}
+      >
+        {ticket.notes ?? "—"}
+      </td>
+      <td style={{ padding: "10px", textAlign: "center" }}>
+        <span
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            color: paid ? C.olive : C.terracotta,
+            background: paid ? `${C.olive}11` : C.terracottaSoft,
+            padding: "2px 8px",
+            borderRadius: 999,
+            letterSpacing: 1.2,
+            textTransform: "uppercase",
+            fontWeight: 700,
+          }}
+        >
+          {paid ? "Pagado" : "Pendiente"}
+        </span>
+      </td>
+      <td style={{ padding: "10px", textAlign: "right" }}>
+        <div
+          style={{
+            display: "inline-flex",
+            gap: 6,
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+          }}
+        >
+          {!paid && (
+            <button
+              type="button"
+              onClick={onMarkPaid}
+              disabled={busy}
+              style={smallActionBtn(C.olive)}
+            >
+              Marcar pagado
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onDeliver}
+            disabled={busy}
+            style={smallActionBtn(C.gold)}
+          >
+            Entregar
+          </button>
+          <button
+            type="button"
+            onClick={onIncident}
+            disabled={busy}
+            style={smallActionBtn(C.terracotta)}
+          >
+            Incidente
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function LuggageHistoryRow({ ticket }: { ticket: LuggageTicketApi }) {
+  const created = new Date(ticket.created_at);
+  const exit = ticket.delivered_at
+    ? new Date(ticket.delivered_at)
+    : ticket.incident_at
+      ? new Date(ticket.incident_at)
+      : null;
+  const status =
+    ticket.status === "active"
+      ? { label: "Activa", color: C.olive }
+      : ticket.status === "delivered"
+        ? { label: "Entregada", color: C.cacao }
+        : { label: "Incidente", color: C.terracotta };
+  return (
+    <tr style={{ borderBottom: `1px solid ${C.sand}` }}>
+      <td style={{ padding: "8px 10px" }}>
+        {ticket.customer_first_name} {ticket.customer_last_name}
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            color: C.mute,
+            marginTop: 1,
+          }}
+        >
+          {ticket.customer_phone}
+        </div>
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          textAlign: "center",
+          fontFamily: FONT_DISPLAY,
+          fontSize: 14,
+          color: C.cacao,
+        }}
+      >
+        #{ticket.ticket_number}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          color: C.cacao,
+        }}
+      >
+        {formatDateShort(created)} {formatHm(created)}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          color: C.mute,
+        }}
+      >
+        {exit ? `${formatDateShort(exit)} ${formatHm(exit)}` : "—"}
+      </td>
+      <td style={{ padding: "8px 10px", textAlign: "center" }}>
+        <span
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            color: status.color,
+            background: `${status.color}11`,
+            padding: "2px 8px",
+            borderRadius: 999,
+            letterSpacing: 1.2,
+            textTransform: "uppercase",
+            fontWeight: 700,
+          }}
+          title={ticket.incident_reason ?? undefined}
+        >
+          {status.label}
+        </span>
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          textAlign: "right",
+          fontFamily: FONT_UI,
+          color: ticket.payment_status === "paid" ? C.gold : C.mute,
+          fontWeight: 600,
+        }}
+      >
+        {ticket.payment_status === "paid" ? fmt(ticket.amount) : "—"}
+      </td>
+    </tr>
+  );
+}
+
+function smallActionBtn(color: string): React.CSSProperties {
+  return {
+    padding: "6px 10px",
+    border: `1px solid ${color}`,
+    background: "transparent",
+    color,
+    borderRadius: 999,
+    fontFamily: FONT_MONO,
+    fontSize: 10,
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+    fontWeight: 700,
+    cursor: "pointer",
+  };
+}
+
+function ReverseExtraIncomeModal({
+  target,
+  onCancel,
+  onDone,
+}: {
+  target: ExtraIncomeApi;
+  onCancel: () => void;
+  onDone: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (reason.trim().length < 3) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await extraIncomeApi.reverse(target.id, reason.trim());
+      onDone();
+    } catch (e) {
+      setError(getErrorMessage(e));
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ReasonModal
+      title="Reversar cobro"
+      hint={`${target.subtype === "male" ? "Baño hombre" : "Baño mujer"} · ${fmt(target.total_amount)}`}
+      value={reason}
+      onChange={setReason}
+      onCancel={onCancel}
+      onSubmit={submit}
+      submitLabel="Reversar"
+      submitting={submitting}
+      error={error}
+    />
+  );
+}
+
+function LuggageIncidentModal({
+  ticket,
+  onCancel,
+  onDone,
+}: {
+  ticket: LuggageTicketApi;
+  onCancel: () => void;
+  onDone: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (reason.trim().length < 3) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await luggageApi.incident(ticket.id, reason.trim());
+      onDone();
+    } catch (e) {
+      setError(getErrorMessage(e));
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <ReasonModal
+      title="Reportar incidente"
+      hint={`Ficha ${ticket.ticket_number} · ${ticket.customer_first_name} ${ticket.customer_last_name}`}
+      value={reason}
+      onChange={setReason}
+      onCancel={onCancel}
+      onSubmit={submit}
+      submitLabel="Registrar incidente"
+      submitting={submitting}
+      error={error}
+    />
+  );
+}
+
+function ReasonModal({
+  title,
+  hint,
+  value,
+  onChange,
+  onCancel,
+  onSubmit,
+  submitLabel,
+  submitting,
+  error,
+}: {
+  title: string;
+  hint: string;
+  value: string;
+  onChange: (v: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+  submitLabel: string;
+  submitting: boolean;
+  error: string | null;
+}) {
+  const canSubmit = value.trim().length >= 3 && !submitting;
+  return (
+    <div
+      role="dialog"
+      aria-modal
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(43,29,20,0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 90,
+        padding: 16,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%",
+          maxWidth: 420,
+          background: C.paper,
+          borderRadius: 16,
+          overflow: "hidden",
+          boxShadow: "0 30px 80px -20px rgba(43,29,20,0.55)",
+        }}
+      >
+        <header
+          style={{
+            padding: "16px 20px 12px",
+            borderBottom: `1px solid ${C.sand}`,
+          }}
+        >
+          <h2
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontSize: 20,
+              color: C.ink,
+              letterSpacing: 0.5,
+              margin: 0,
+              textTransform: "uppercase",
+            }}
+          >
+            {title}
+          </h2>
+          <div
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              color: C.mute,
+              letterSpacing: 1.2,
+              marginTop: 4,
+            }}
+          >
+            {hint}
+          </div>
+        </header>
+        <div style={{ padding: "14px 20px" }}>
+          <textarea
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder="Razón (mínimo 3 caracteres)"
+            rows={3}
+            autoFocus
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              border: `1px solid ${C.sand}`,
+              borderRadius: 10,
+              background: C.paper,
+              color: C.ink,
+              fontFamily: FONT_UI,
+              fontSize: 14,
+              outline: "none",
+              resize: "vertical",
+            }}
+          />
+          {error && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 8,
+                background: C.terracottaSoft,
+                color: C.terracotta,
+                borderRadius: 6,
+                fontFamily: FONT_MONO,
+                fontSize: 11,
+              }}
+            >
+              {error}
+            </div>
+          )}
+        </div>
+        <footer
+          style={{
+            padding: "10px 20px 14px",
+            borderTop: `1px solid ${C.sand}`,
+            background: C.cream,
+            display: "flex",
+            gap: 10,
+            justifyContent: "flex-end",
+          }}
+        >
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={submitting}
+            style={{
+              padding: "8px 16px",
+              border: `1px solid ${C.sand}`,
+              background: "transparent",
+              color: C.cacao,
+              borderRadius: 999,
+              fontFamily: FONT_MONO,
+              fontSize: 11,
+              letterSpacing: 1.5,
+              textTransform: "uppercase",
+              fontWeight: 700,
+              cursor: submitting ? "wait" : "pointer",
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={!canSubmit}
+            style={{
+              padding: "8px 18px",
+              border: "none",
+              background: canSubmit ? C.terracotta : C.sand,
+              color: canSubmit ? C.paper : C.mute,
+              borderRadius: 999,
+              fontFamily: FONT_DISPLAY,
+              fontSize: 13,
+              letterSpacing: 1.8,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              cursor: canSubmit ? "pointer" : "not-allowed",
+            }}
+          >
+            {submitting ? "Guardando..." : submitLabel}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function rangeToIsoBounds(range: DateRange): {
+  from?: string;
+  to?: string;
+} {
+  if (range.kind === "custom") {
+    return { from: toIsoStart(range.from), to: toIsoEnd(range.to) };
+  }
+  if (range.from && range.to) {
+    return { from: toIsoStart(range.from), to: toIsoEnd(range.to) };
+  }
+  return {};
+}
+
+function toIsoStart(yyyymmdd: string): string {
+  return new Date(`${yyyymmdd}T00:00:00`).toISOString();
+}
+
+function toIsoEnd(yyyymmdd: string): string {
+  const d = new Date(`${yyyymmdd}T00:00:00`);
+  d.setDate(d.getDate() + 1);
+  return d.toISOString();
+}
+
+function formatDateShort(d: Date): string {
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  return `${day}/${month}`;
 }

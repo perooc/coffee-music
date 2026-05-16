@@ -20,6 +20,7 @@ import { AdminBillDrawer } from "@/components/admin/AdminBillDrawer";
 import { KpiStrip, type Kpi } from "@/components/admin/KpiStrip";
 import { TablesMap } from "@/components/admin/TablesMap";
 import { MusicPanel } from "@/components/admin/MusicPanel";
+import { ExtrasDock } from "@/components/admin/ExtrasDock";
 import type {
   Order,
   OrderRequest,
@@ -1608,6 +1609,7 @@ export default function AdminPage() {
       />
 
       <ToastStack toasts={toasts} />
+      <ExtrasDock />
     </>
   );
 }

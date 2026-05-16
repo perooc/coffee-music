@@ -18,6 +18,8 @@ import { MusicModule } from "./modules/music/music.module";
 import { HousePlaylistModule } from "./modules/house-playlist/house-playlist.module";
 import { AuditLogModule } from "./modules/audit-log/audit-log.module";
 import { AccessCodeModule } from "./modules/access-code/access-code.module";
+import { ExtraIncomeModule } from "./modules/extra-income/extra-income.module";
+import { LuggageModule } from "./modules/luggage/luggage.module";
 import { rateLimitMiddleware } from "./common/rate-limit.middleware";
 import { loggingMiddleware } from "./common/logging.middleware";
 import { PlaybackModule } from "./modules/playback/playback.module";
@@ -42,6 +44,8 @@ import { PlaybackModule } from "./modules/playback/playback.module";
     TableProjectionModule,
     TableSessionsModule,
     TablesModule,
+    ExtraIncomeModule,
+    LuggageModule,
   ],
   providers: [
     // SentryGlobalFilter forwards every uncaught exception to Sentry
@@ -74,6 +78,13 @@ export class AppModule implements NestModule {
         { path: "auth/reset-password", method: RequestMethod.POST },
         { path: "bill/:sessionId/adjustments", method: RequestMethod.POST },
         { path: "consumptions/:id/refund", method: RequestMethod.POST },
+        // Cobros rápidos de baño/maletas — rate-limit para que un click
+        // accidental largo no genere 50 registros.
+        {
+          path: "admin/extra-income/restroom",
+          method: RequestMethod.POST,
+        },
+        { path: "admin/luggage", method: RequestMethod.POST },
       );
   }
 }

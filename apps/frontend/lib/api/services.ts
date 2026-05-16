@@ -1055,3 +1055,170 @@ export const musicApi = {
   getBudget: (): Promise<{ snapshot: MusicBudgetSnapshot | null }> =>
     adminApi.get("/music/budget").then((r) => r.data),
 };
+
+// ─── Extra income (servicios accesorios — baño) ─────────────────────────────
+export type ExtraIncomeApi = {
+  id: number;
+  type: "restroom";
+  subtype: string | null;
+  amount: number;
+  quantity: number;
+  total_amount: number;
+  status: "active" | "reversed";
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  reversed_by: string | null;
+  reversed_at: string | null;
+  reverse_reason: string | null;
+};
+
+export type ExtraIncomeSummary = {
+  range: { from: string; to: string };
+  restroom: {
+    male: { count: number; revenue: number };
+    female: { count: number; revenue: number };
+    total: { count: number; revenue: number };
+  };
+};
+
+export const extraIncomeApi = {
+  /** Registrar cobro de baño. Precio FORZADO por backend según subtype. */
+  createRestroom: (
+    subtype: "male" | "female",
+    notes?: string,
+  ): Promise<ExtraIncomeApi> =>
+    adminApi
+      .post<ExtraIncomeApi>("/admin/extra-income/restroom", { subtype, notes })
+      .then((r) => r.data),
+
+  list: (params?: {
+    type?: "restroom";
+    status?: "active" | "reversed";
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<ExtraIncomeApi[]> => {
+    const q = new URLSearchParams();
+    if (params?.type) q.set("type", params.type);
+    if (params?.status) q.set("status", params.status);
+    if (params?.from) q.set("from", params.from);
+    if (params?.to) q.set("to", params.to);
+    if (params?.limit) q.set("limit", String(params.limit));
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return adminApi
+      .get<ExtraIncomeApi[]>(`/admin/extra-income${suffix}`)
+      .then((r) => r.data);
+  },
+
+  summary: (params?: {
+    from?: string;
+    to?: string;
+  }): Promise<ExtraIncomeSummary> => {
+    const q = new URLSearchParams();
+    if (params?.from) q.set("from", params.from);
+    if (params?.to) q.set("to", params.to);
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return adminApi
+      .get<ExtraIncomeSummary>(`/admin/extra-income/summary${suffix}`)
+      .then((r) => r.data);
+  },
+
+  reverse: (id: number, reason: string): Promise<ExtraIncomeApi> =>
+    adminApi
+      .post<ExtraIncomeApi>(`/admin/extra-income/${id}/reverse`, { reason })
+      .then((r) => r.data),
+};
+
+// ─── Luggage (guardarropa con ficha física) ─────────────────────────────────
+export type LuggageTicketApi = {
+  id: number;
+  ticket_number: number;
+  customer_first_name: string;
+  customer_last_name: string;
+  customer_phone: string;
+  amount: number;
+  payment_status: "pending" | "paid";
+  status: "active" | "delivered" | "incident";
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  delivered_by: string | null;
+  delivered_at: string | null;
+  incident_reason: string | null;
+  incident_at: string | null;
+  incident_by: string | null;
+};
+
+export type LuggageSummary = {
+  range: { from: string; to: string };
+  luggage: {
+    count: number;
+    revenue: number;
+    pending_count: number;
+    active_count: number;
+    incident_count: number;
+  };
+};
+
+export const luggageApi = {
+  create: (payload: {
+    ticket_number: number;
+    customer_first_name: string;
+    customer_last_name: string;
+    customer_phone: string;
+    payment_status?: "pending" | "paid";
+    notes?: string;
+  }): Promise<LuggageTicketApi> =>
+    adminApi
+      .post<LuggageTicketApi>("/admin/luggage", payload)
+      .then((r) => r.data),
+
+  list: (params?: {
+    status?: "active" | "delivered" | "incident";
+    limit?: number;
+  }): Promise<LuggageTicketApi[]> => {
+    const q = new URLSearchParams();
+    if (params?.status) q.set("status", params.status);
+    if (params?.limit) q.set("limit", String(params.limit));
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return adminApi
+      .get<LuggageTicketApi[]>(`/admin/luggage${suffix}`)
+      .then((r) => r.data);
+  },
+
+  search: (q: string): Promise<LuggageTicketApi[]> =>
+    adminApi
+      .get<LuggageTicketApi[]>(
+        `/admin/luggage/search?q=${encodeURIComponent(q)}`,
+      )
+      .then((r) => r.data),
+
+  summary: (params?: { from?: string; to?: string }): Promise<LuggageSummary> => {
+    const q = new URLSearchParams();
+    if (params?.from) q.set("from", params.from);
+    if (params?.to) q.set("to", params.to);
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return adminApi
+      .get<LuggageSummary>(`/admin/luggage/summary${suffix}`)
+      .then((r) => r.data);
+  },
+
+  deliver: (id: number): Promise<LuggageTicketApi> =>
+    adminApi
+      .post<LuggageTicketApi>(`/admin/luggage/${id}/deliver`)
+      .then((r) => r.data),
+
+  incident: (id: number, reason: string): Promise<LuggageTicketApi> =>
+    adminApi
+      .post<LuggageTicketApi>(`/admin/luggage/${id}/incident`, { reason })
+      .then((r) => r.data),
+
+  updatePayment: (
+    id: number,
+    payment_status: "pending" | "paid",
+  ): Promise<LuggageTicketApi> =>
+    adminApi
+      .patch<LuggageTicketApi>(`/admin/luggage/${id}/payment`, { payment_status })
+      .then((r) => r.data),
+};

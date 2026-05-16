@@ -617,3 +617,114 @@ model AuditLog {
   @@index([kind, created_at])
   @@index([actor_id, created_at])
 }
+
+
+// ─── Ingresos extra (servicios accesorios) ─────────────────────────────────
+//
+// Modela ingresos que NO son ventas del catálogo (sin Product, sin
+// TableSession, sin Consumption). Hoy: cobro por uso del baño. Diseñado
+// para admitir más tipos sin migraciones (ej. cover, propinas obligatorias).
+//
+// Reglas anti-fraude:
+//   - El precio (`amount`) es FORZADO por el backend según subtype. El
+//     frontend NUNCA lo envía. Cualquier valor en el body se ignora.
+//   - No existe DELETE: la corrección operativa es marcar `reversed_at`.
+//     El registro original queda para auditoría.
+//   - `total_amount` se persiste calculado al guardar para que los
+//     reportes no tengan que multiplicar a posteriori (quantity * amount).
+
+enum ExtraIncomeType {
+  // Servicio de baño con tarifa diferenciada por subtype.
+  restroom
+}
+
+// Subtypes posibles del baño. Texto libre como string para no atarse a
+// un enum específico por tipo — si mañana sumamos `cover` con subtype
+// (general/preferente) el modelo no tiene que crecer en enums paralelos.
+// Validación de valores válidos vive en el service por tipo.
+enum ExtraIncomeStatus {
+  active
+  reversed
+}
+
+model ExtraIncome {
+  id            Int               @id @default(autoincrement())
+  type          ExtraIncomeType
+  // Variante dentro del tipo. Para restroom: "male" | "female". Validado
+  // en el service según el tipo. Nullable para tipos futuros sin variante.
+  subtype       String?
+  // Precio unitario FORZADO por backend. Persistido en la fila para que
+  // un cambio futuro de tarifa no altere los reportes históricos: cada
+  // cobro mantiene el precio que regía en su momento.
+  amount        Decimal           @db.Decimal(10, 2)
+  quantity      Int               @default(1)
+  total_amount  Decimal           @db.Decimal(10, 2)
+  status        ExtraIncomeStatus @default(active)
+  notes         String?
+  // Texto libre del staff que registró el cobro. NO es FK a User para
+  // sobrevivir borrados del staff (igual que voided_by en TableSession).
+  created_by    String?
+  created_at    DateTime          @default(now())
+  // Campos de reverso. Si status=reversed, los tres deben estar presentes.
+  // El service lo enforce.
+  reversed_by    String?
+  reversed_at    DateTime?
+  reverse_reason String?
+
+  @@index([type, status, created_at])
+  @@index([created_at])
+}
+
+// ─── Guarda maletas (servicio con lifecycle + ficha física) ────────────────
+//
+// Tiene entidad propia (no ExtraIncome) porque modela:
+//   - una ficha física numerada (1-30) reusable
+//   - lifecycle: active → delivered | incident
+//   - búsqueda por nombre / teléfono / ficha
+//   - datos del cliente
+//
+// Precio fijo $5.000 forzado por backend. Igual filosofía anti-fraude.
+//
+// Constraint operacional: no puede existir más de un LuggageTicket con
+// (ticket_number, status=active). Lo enforce un partial unique index
+// que solo aplica cuando status='active'. Cuando la maleta se entrega
+// o se reporta incidente, la ficha vuelve a estar libre.
+
+enum LuggageStatus {
+  active     // Maleta en el bar, ficha entregada al cliente
+  delivered  // Maleta entregada al cliente, ficha vuelve al pool
+  incident   // Ficha perdida o problema operativo
+}
+
+enum LuggagePaymentStatus {
+  pending  // Cliente aún no paga
+  paid     // Cobrado al ingresar
+}
+
+model LuggageTicket {
+  id                   Int                  @id @default(autoincrement())
+  // Número de la ficha física (1-30 hoy; ampliable cambiando la UI).
+  // Validación de unicidad mientras está active vive en el service: la
+  // BD garantiza la unicidad con un índice parcial creado en la migration.
+  ticket_number        Int
+  customer_first_name  String
+  customer_last_name   String
+  customer_phone       String
+  amount               Decimal              @db.Decimal(10, 2)
+  payment_status       LuggagePaymentStatus @default(pending)
+  status               LuggageStatus        @default(active)
+  notes                String?
+  created_by           String?
+  created_at           DateTime             @default(now())
+  // Campos de entrega.
+  delivered_by         String?
+  delivered_at         DateTime?
+  // Campos de incidente.
+  incident_reason      String?
+  incident_at          DateTime?
+  incident_by          String?
+
+  @@index([status, created_at])
+  @@index([ticket_number, status])
+  @@index([customer_phone])
+}
