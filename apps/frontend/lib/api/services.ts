@@ -584,7 +584,10 @@ export type ClosedSessionApi = {
   subtotal: number;
   adjustments_total: number;
   partial_payments_total: number;
+  /** Saldo del ledger al cierre (NO es lo cobrado si hubo anticipos). */
   total: number;
+  /** Lo efectivamente cobrado por la cuenta. = subtotal + adjustments_total. */
+  collected: number;
   lines: ClosedSessionLineApi[];
 };
 

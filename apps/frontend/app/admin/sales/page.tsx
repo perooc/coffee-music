@@ -2215,7 +2215,7 @@ function ClosedSessionRow({
               textDecoration: isVoid ? "line-through" : "none",
             }}
           >
-            {fmt(session.total)}
+            {fmt(session.collected)}
           </div>
         </div>
       </button>
@@ -2330,10 +2330,20 @@ function ThermalReceipt({ session }: { session: ClosedSessionApi }) {
       : `MESA ${session.table_number ?? session.table_id}`;
   const openedAt = new Date(session.opened_at);
   const closedAt = session.closed_at ? new Date(session.closed_at) : null;
-  // Subtotal y total son iguales si no hubo ajustes ni anticipos —
-  // mostrar ambos solo confunde al operador. Solo "Total" en ese caso.
-  const showSubtotalBreakdown =
-    session.adjustments_total !== 0 || session.partial_payments_total !== 0;
+  // Mostramos la línea de descuentos/refunds solo si afectaron lo cobrado
+  // (ajustes reales sobre productos). Los refunds de partial_payment ya
+  // están reclasificados como partials en el backend, así que aquí
+  // adjustments_total refleja únicamente descuentos/refunds genuinos.
+  const showAdjustments = session.adjustments_total !== 0;
+  // Anticipos: cuando los hubo, mostramos "Anticipos cobrados" y
+  // "Pagado al cierre" como info, no como restas al total.
+  const hadPartialPayments = session.partial_payments_total !== 0;
+  // partial_payments_total ya es negativo en la BD. Lo invertimos para
+  // mostrarlo en positivo ("cobrado $19.000 por adelantado").
+  const partialsCollected = Math.abs(session.partial_payments_total);
+  // Lo cobrado al cierre = collected − anticipos netos (en valor absoluto
+  // de los partials, ya que partial es negativo).
+  const paidAtClose = session.collected - partialsCollected;
 
   return (
     <div
@@ -2422,28 +2432,33 @@ function ThermalReceipt({ session }: { session: ClosedSessionApi }) {
         <ReceiptDivider />
 
         {/* Totales */}
-        {showSubtotalBreakdown && (
+        <ReceiptRow left="Subtotal" right={fmt(session.subtotal)} />
+        {showAdjustments && (
+          <ReceiptRow
+            left={session.adjustments_total < 0 ? "Descuentos" : "Ajustes"}
+            right={fmt(session.adjustments_total)}
+            tone="alert"
+          />
+        )}
+        {hadPartialPayments && (
           <>
-            <ReceiptRow left="Subtotal" right={fmt(session.subtotal)} />
-            {session.adjustments_total !== 0 && (
-              <ReceiptRow
-                left="Ajustes / refunds"
-                right={fmt(session.adjustments_total)}
-                tone="alert"
-              />
-            )}
-            {session.partial_payments_total !== 0 && (
-              <ReceiptRow
-                left="Pagos parciales"
-                right={fmt(session.partial_payments_total)}
-              />
-            )}
             <ReceiptDivider thin />
+            <ReceiptRow
+              left="Anticipos cobrados"
+              right={fmt(partialsCollected)}
+              tone="muted"
+            />
+            <ReceiptRow
+              left="Pagado al cierre"
+              right={fmt(paidAtClose)}
+              tone="muted"
+            />
           </>
         )}
+        <ReceiptDivider thin />
         <ReceiptRow
-          left="TOTAL"
-          right={fmt(session.total)}
+          left="TOTAL COBRADO"
+          right={fmt(session.collected)}
           bold
           big
           strikethrough={session.outcome === "void"}
@@ -2597,9 +2612,17 @@ function ReceiptRow({
   right: string;
   bold?: boolean;
   big?: boolean;
-  tone?: "ok" | "alert";
+  tone?: "ok" | "alert" | "muted";
   strikethrough?: boolean;
 }) {
+  const color =
+    tone === "alert"
+      ? "#8B2635"
+      : tone === "ok"
+        ? "#5C7A3A"
+        : tone === "muted"
+          ? "#6B4E2E"
+          : "#2B1D14";
   return (
     <div
       style={{
@@ -2609,8 +2632,7 @@ function ReceiptRow({
         gap: 8,
         fontSize: big ? 15 : 12,
         fontWeight: bold ? 700 : 400,
-        color:
-          tone === "alert" ? "#8B2635" : tone === "ok" ? "#5C7A3A" : "#2B1D14",
+        color,
         textDecoration: strikethrough ? "line-through" : "none",
       }}
     >

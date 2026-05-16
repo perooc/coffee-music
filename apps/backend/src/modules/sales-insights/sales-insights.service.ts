@@ -128,12 +128,33 @@ export type ClosedSession = {
   outcome: "paid" | "void";
   /** Suma de productos vendidos (positivos). No incluye descuentos/refunds. */
   subtotal: number;
-  /** Sumatoria de discount + adjustment + refund (negativos en su mayoría). */
+  /**
+   * Ajustes / descuentos / refunds que afectan al cobro real (los de
+   * productos). Los refunds de partial_payment NO van acá — esos son
+   * correcciones internas del ledger.
+   */
   adjustments_total: number;
-  /** Pagos parciales (anticipos, ya negativos en la BD). */
+  /**
+   * Pagos parciales NETOS = suma de partial_payment + suma de refunds
+   * que revierten partial_payment. Si un anticipo erróneo fue revertido
+   * y reemplazado, el neto refleja sólo el monto vigente.
+   */
   partial_payments_total: number;
-  /** Total final = lo que efectivamente cobró el bar. = total_consumption persistido. */
+  /**
+   * Saldo del ledger al cierre. = subtotal + adjustments_total +
+   * partial_payments_total. Para una cuenta sin anticipos, este número
+   * es lo que el bar cobró al cierre. Con anticipos, es el saldo
+   * restante después de los anticipos.
+   */
   total: number;
+  /**
+   * Lo que el bar efectivamente cobró por la cuenta, sumando anticipos y
+   * pago al cierre. = subtotal + adjustments_total. Para cuentas sin
+   * descuentos ni refunds de producto, `collected === subtotal`. Es el
+   * número que el operador busca cuando pregunta "¿cuánto vendió?".
+   * Para sesiones `void`, collected = 0.
+   */
+  collected: number;
   /** Líneas del ledger, ordenadas por created_at ascendente. */
   lines: ClosedSessionLine[];
 };
@@ -684,6 +705,11 @@ export class SalesInsightsService {
             unit_amount: true,
             amount: true,
             created_at: true,
+            reverses_id: true,
+            // Tipo del consumption que esta fila revierte. Lo usamos para
+            // distinguir "refund de producto" (afecta cobro) de "refund
+            // de pago parcial" (corrección interna del ledger).
+            reverses: { select: { type: true } },
           },
         },
       },
@@ -745,14 +771,27 @@ export class SalesInsightsService {
       let partials = 0;
       const lines: ClosedSessionLine[] = s.consumptions.map((c) => {
         const amount = Number(c.amount);
+        // Clasificación cuidadosa de refunds: un refund que reversa un
+        // `partial_payment` es una CORRECCIÓN del registro de anticipos
+        // (anuló un anticipo mal ingresado y se reemplazó). Ese movimiento
+        // NO afecta lo cobrado al bar — solo neutraliza el partial_payment
+        // erróneo. Por eso lo sumamos a `partials` (donde compensará el
+        // anticipo original) en vez de a `adjustments` (donde se vería como
+        // "el bar devolvió plata al cliente", lo cual es falso).
+        const isPartialRefund =
+          c.type === ConsumptionType.refund &&
+          c.reverses?.type === ConsumptionType.partial_payment;
         switch (c.type) {
           case ConsumptionType.product:
             subtotal += amount;
             break;
           case ConsumptionType.discount:
           case ConsumptionType.adjustment:
-          case ConsumptionType.refund:
             adjustments += amount;
+            break;
+          case ConsumptionType.refund:
+            if (isPartialRefund) partials += amount;
+            else adjustments += amount;
             break;
           case ConsumptionType.partial_payment:
             partials += amount;
@@ -775,9 +814,16 @@ export class SalesInsightsService {
         };
       });
       const total = Number(s.total_consumption);
+      // `collected` = lo efectivamente cobrado por la cuenta. Subtotal de
+      // productos menos descuentos / refunds DE PRODUCTOS. Los anticipos
+      // no se restan: son una forma de cobrar (plata que el bar ya tiene),
+      // no un descuento. Y los refunds-de-partial-payment ya fueron
+      // reclasificados a `partials` arriba, así que no contaminan
+      // `adjustments`. Para sesiones void: collected = 0 (no se cobró).
+      const collected = outcome === "void" ? 0 : subtotal + adjustments;
       if (outcome === "paid") {
         paidCount += 1;
-        paidRevenue += total;
+        paidRevenue += collected;
       } else {
         voidCount += 1;
         // Lo "perdido" en void = suma de productos (subtotal). Si el
@@ -802,6 +848,7 @@ export class SalesInsightsService {
         adjustments_total: round(adjustments),
         partial_payments_total: round(partials),
         total: round(total),
+        collected: round(collected),
         lines,
       };
     });
