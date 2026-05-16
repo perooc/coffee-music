@@ -5,6 +5,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   salesInsightsApi,
+  type ClosedSessionApi,
+  type ClosedSessionLineApi,
+  type ClosedSessionsResponse,
+  type ProductMetricsResponse,
+  type ProductMetricsRowApi,
   type ProductSalesSummary,
   type SalesInsightsResponse,
 } from "@/lib/api/services";
@@ -46,11 +51,30 @@ const DEFAULT_RANGE: DateRange = {
   days: 1,
 };
 
+type TabKey = "summary" | "detail" | "products";
+
+const TAB_STORAGE_KEY = "admin_sales_tab";
+
 export default function AdminSalesPage() {
   const [range, setRange] = useState<DateRange>(DEFAULT_RANGE);
   const [data, setData] = useState<SalesInsightsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Persistimos la última pestaña en sessionStorage para que un refresh
+  // del navegador devuelva al operador al mismo sitio. No usamos query
+  // string para evitar reload del componente al cambiar de tab.
+  const [tab, setTab] = useState<TabKey>(() => {
+    if (typeof window === "undefined") return "summary";
+    const stored = window.sessionStorage.getItem(TAB_STORAGE_KEY);
+    if (stored === "summary" || stored === "detail" || stored === "products") {
+      return stored;
+    }
+    return "summary";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.setItem(TAB_STORAGE_KEY, tab);
+  }, [tab]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -184,6 +208,7 @@ export default function AdminSalesPage() {
       </header>
 
       <RangeFilter value={range} onChange={setRange} />
+      <TabBar value={tab} onChange={setTab} />
 
       {error && (
         <div
@@ -220,7 +245,7 @@ export default function AdminSalesPage() {
         </div>
       )}
 
-      {data && (
+      {data && tab === "summary" && (
         <>
           <SalesKpiStrip
             summary={data.summary}
@@ -351,8 +376,71 @@ export default function AdminSalesPage() {
           </div>
         </>
       )}
+
+      {tab === "detail" && <DetailTab range={range} liveTick={liveJustRefreshed} />}
+      {tab === "products" && <ProductsTab range={range} liveTick={liveJustRefreshed} />}
     </main>
     </>
+  );
+}
+
+// ─── Tab bar ────────────────────────────────────────────────────────────────
+function TabBar({
+  value,
+  onChange,
+}: {
+  value: TabKey;
+  onChange: (v: TabKey) => void;
+}) {
+  const tabs: { key: TabKey; label: string; hint: string }[] = [
+    { key: "summary", label: "Resumen", hint: "KPIs, charts y rankings" },
+    { key: "detail", label: "Detalle", hint: "Cuentas cerradas con líneas" },
+    { key: "products", label: "Productos", hint: "Catálogo con métricas" },
+  ];
+  return (
+    <nav
+      role="tablist"
+      aria-label="Vistas de ventas"
+      style={{
+        display: "flex",
+        gap: 4,
+        marginBottom: 14,
+        borderBottom: `1px solid ${C.sand}`,
+        overflowX: "auto",
+      }}
+    >
+      {tabs.map((t) => {
+        const active = t.key === value;
+        return (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            title={t.hint}
+            onClick={() => onChange(t.key)}
+            style={{
+              padding: "10px 14px",
+              border: "none",
+              background: "transparent",
+              fontFamily: FONT_DISPLAY,
+              fontSize: 13,
+              letterSpacing: 2.5,
+              color: active ? C.ink : C.mute,
+              textTransform: "uppercase",
+              fontWeight: 700,
+              cursor: "pointer",
+              borderBottom: `2px solid ${active ? C.gold : "transparent"}`,
+              marginBottom: -1,
+              whiteSpace: "nowrap",
+              transition: `color ${DUR_BASE}ms ease, border-color ${DUR_BASE}ms ease`,
+            }}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -1881,4 +1969,948 @@ function Empty({ text }: { text: string }) {
       {text}
     </div>
   );
+}
+
+// Convierte el DateRange compartido en params para las APIs nuevas.
+// DRY: el bloque ya existe inline en `refresh()`; ambos tabs lo reusan.
+function rangeToParams(range: DateRange): {
+  from?: string;
+  to?: string;
+  days?: number;
+} {
+  if (range.kind === "custom") {
+    return { from: range.from, to: range.to };
+  }
+  if (range.from && range.to) {
+    return { from: range.from, to: range.to };
+  }
+  return { days: range.days };
+}
+
+// ─── Tab "Detalle" ──────────────────────────────────────────────────────────
+// Cuentas cerradas en el rango. Lista clickeable (cada fila expande para
+// ver el detalle de líneas — productos, descuentos, refunds, pagos
+// parciales). Pagadas y anuladas comparten lista; las anuladas llevan
+// badge "Anulada" + razón.
+function DetailTab({
+  range,
+  liveTick,
+}: {
+  range: DateRange;
+  liveTick: boolean;
+}) {
+  const [data, setData] = useState<ClosedSessionsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await salesInsightsApi.getClosedSessions(rangeToParams(range));
+      setData(res);
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [range]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Refresco oportunista cuando el padre detecta un cambio (delivery,
+  // refund, cierre). `liveTick` se prende ~1s tras un evento de socket.
+  useEffect(() => {
+    if (liveTick) void load();
+  }, [liveTick, load]);
+
+  const toggleExpand = (sessionId: number) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  };
+
+  if (loading && !data) return <LoadingBlock />;
+  if (error) return <ErrorBlock text={error} />;
+  if (!data) return null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* KPIs del tab: resumen de paid vs void. Más liviano que el strip
+          del Resumen — acá el foco es la lista de cuentas. */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: 10,
+        }}
+      >
+        <MiniStat
+          label="Cuentas cerradas"
+          value={String(data.total)}
+          hint={`${data.paid_count} pagadas · ${data.void_count} anuladas`}
+        />
+        <MiniStat label="Ingresos cobrados" value={fmt(data.paid_revenue)} />
+        <MiniStat
+          label="Anulado (perdido)"
+          value={fmt(data.void_lost_revenue)}
+          tone={data.void_lost_revenue > 0 ? "alert" : "neutral"}
+        />
+      </div>
+
+      {data.sessions.length === 0 ? (
+        <Panel title="Sin cuentas cerradas">
+          <Empty text="No hubo cierres en este rango" />
+        </Panel>
+      ) : (
+        <Panel title={`Detalle (${data.sessions.length})`}>
+          <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
+            <AnimatePresence initial={false}>
+              {data.sessions.map((s) => (
+                <ClosedSessionRow
+                  key={s.session_id}
+                  session={s}
+                  expanded={expanded.has(s.session_id)}
+                  onToggle={() => toggleExpand(s.session_id)}
+                />
+              ))}
+            </AnimatePresence>
+          </ul>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+function ClosedSessionRow({
+  session,
+  expanded,
+  onToggle,
+}: {
+  session: ClosedSessionApi;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const tableLabel =
+    session.table_kind === "BAR"
+      ? `Barra ${session.table_number ?? session.table_id}`
+      : `Mesa ${session.table_number ?? session.table_id}`;
+  const closedAt = session.closed_at ? new Date(session.closed_at) : null;
+  const openedAt = new Date(session.opened_at);
+  const isVoid = session.outcome === "void";
+
+  return (
+    <li
+      style={{
+        borderBottom: `1px solid ${C.sand}`,
+      }}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+          padding: "10px 0",
+          background: "transparent",
+          border: "none",
+          textAlign: "left",
+          cursor: "pointer",
+          color: C.ink,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1 }}>
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 10,
+              color: C.mute,
+              letterSpacing: 1.5,
+              fontWeight: 700,
+              minWidth: 12,
+            }}
+          >
+            {expanded ? "▾" : "▸"}
+          </span>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "baseline",
+                gap: 8,
+                flexWrap: "wrap",
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: FONT_DISPLAY,
+                  fontSize: 16,
+                  color: C.ink,
+                  letterSpacing: 0.5,
+                }}
+              >
+                {tableLabel}
+              </span>
+              {session.custom_name && (
+                <span
+                  style={{
+                    fontFamily: FONT_UI,
+                    fontSize: 12,
+                    color: C.mute,
+                  }}
+                >
+                  · {session.custom_name}
+                </span>
+              )}
+              {isVoid && (
+                <span
+                  style={{
+                    fontFamily: FONT_MONO,
+                    fontSize: 9,
+                    color: C.terracotta,
+                    background: C.terracottaSoft,
+                    padding: "2px 6px",
+                    borderRadius: 999,
+                    letterSpacing: 1.5,
+                    textTransform: "uppercase",
+                    fontWeight: 700,
+                  }}
+                >
+                  Anulada · {session.void_reason ?? "sin razón"}
+                </span>
+              )}
+            </div>
+            <div
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 10,
+                color: C.mute,
+                letterSpacing: 1.2,
+                textTransform: "uppercase",
+                marginTop: 2,
+              }}
+            >
+              {formatHm(openedAt)}
+              {closedAt && ` → ${formatHm(closedAt)}`} · {session.lines.length} líneas
+            </div>
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontSize: 18,
+              color: isVoid ? C.mute : C.gold,
+              letterSpacing: 0.5,
+              textDecoration: isVoid ? "line-through" : "none",
+            }}
+          >
+            {fmt(session.total)}
+          </div>
+        </div>
+      </button>
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            key="detail"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: DUR_BASE / 1000, ease: [0.16, 1, 0.3, 1] }}
+            style={{ overflow: "hidden" }}
+          >
+            <ClosedSessionDetail session={session} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </li>
+  );
+}
+
+function ClosedSessionDetail({ session }: { session: ClosedSessionApi }) {
+  return (
+    <div
+      style={{
+        background: C.cream,
+        border: `1px solid ${C.sand}`,
+        borderRadius: 10,
+        margin: "0 0 12px",
+        padding: "10px 12px",
+      }}
+    >
+      <ul style={{ margin: 0, padding: 0, listStyle: "none" }}>
+        {session.lines.map((l) => (
+          <SessionLine key={l.consumption_id} line={l} />
+        ))}
+      </ul>
+      <div
+        style={{
+          marginTop: 8,
+          paddingTop: 8,
+          borderTop: `1px dashed ${C.sand}`,
+          display: "grid",
+          gridTemplateColumns: "1fr auto",
+          rowGap: 4,
+          columnGap: 14,
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          color: C.cacao,
+          letterSpacing: 1,
+          textTransform: "uppercase",
+        }}
+      >
+        <span>Subtotal</span>
+        <span style={{ textAlign: "right", fontFamily: FONT_UI }}>
+          {fmt(session.subtotal)}
+        </span>
+        {session.adjustments_total !== 0 && (
+          <>
+            <span>Ajustes / descuentos / refunds</span>
+            <span style={{ textAlign: "right", fontFamily: FONT_UI }}>
+              {fmt(session.adjustments_total)}
+            </span>
+          </>
+        )}
+        {session.partial_payments_total !== 0 && (
+          <>
+            <span>Pagos parciales</span>
+            <span style={{ textAlign: "right", fontFamily: FONT_UI }}>
+              {fmt(session.partial_payments_total)}
+            </span>
+          </>
+        )}
+        <span style={{ fontWeight: 700, color: C.ink }}>Total</span>
+        <span
+          style={{
+            textAlign: "right",
+            fontFamily: FONT_DISPLAY,
+            fontSize: 14,
+            color: C.gold,
+            letterSpacing: 1,
+          }}
+        >
+          {fmt(session.total)}
+        </span>
+      </div>
+      {session.outcome === "void" && session.void_other_detail && (
+        <div
+          style={{
+            marginTop: 8,
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            color: C.terracotta,
+            letterSpacing: 1,
+          }}
+        >
+          Nota anulación: {session.void_other_detail}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionLine({ line }: { line: ClosedSessionLineApi }) {
+  // El color del monto depende del tipo: productos = ink (cobro normal),
+  // refunds/descuentos = terracotta (resta), partial_payment = olive
+  // (anticipo). Le da al operador una lectura visual del ledger.
+  const tone =
+    line.type === "refund" || line.type === "discount"
+      ? C.terracotta
+      : line.type === "partial_payment"
+        ? C.olive
+        : line.type === "adjustment"
+          ? C.cacao
+          : C.ink;
+  return (
+    <li
+      style={{
+        display: "flex",
+        alignItems: "baseline",
+        justifyContent: "space-between",
+        padding: "4px 0",
+        gap: 10,
+        fontFamily: FONT_UI,
+        fontSize: 13,
+        color: C.ink,
+      }}
+    >
+      <span style={{ minWidth: 0, flex: 1 }}>
+        {line.quantity !== 1 && (
+          <span
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 11,
+              color: C.cacao,
+              fontWeight: 700,
+              marginRight: 6,
+            }}
+          >
+            {line.quantity}×
+          </span>
+        )}
+        {line.description}
+      </span>
+      <span style={{ color: tone, whiteSpace: "nowrap" }}>{fmt(line.amount)}</span>
+    </li>
+  );
+}
+
+function MiniStat({
+  label,
+  value,
+  hint,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: "neutral" | "alert";
+}) {
+  return (
+    <div
+      style={{
+        background: C.paper,
+        border: `1px solid ${C.sand}`,
+        borderRadius: 12,
+        padding: "10px 14px",
+      }}
+    >
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 9,
+          letterSpacing: 2,
+          color: C.mute,
+          textTransform: "uppercase",
+          fontWeight: 700,
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: FONT_DISPLAY,
+          fontSize: 20,
+          color: tone === "alert" ? C.terracotta : C.ink,
+          letterSpacing: 0.5,
+          marginTop: 2,
+        }}
+      >
+        {value}
+      </div>
+      {hint && (
+        <div
+          style={{
+            fontFamily: FONT_MONO,
+            fontSize: 9,
+            color: C.mute,
+            letterSpacing: 1.2,
+            textTransform: "uppercase",
+            marginTop: 3,
+          }}
+        >
+          {hint}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LoadingBlock() {
+  return (
+    <div
+      style={{
+        padding: 32,
+        textAlign: "center",
+        fontFamily: FONT_MONO,
+        fontSize: 11,
+        color: C.mute,
+        letterSpacing: 2,
+        textTransform: "uppercase",
+      }}
+    >
+      Cargando...
+    </div>
+  );
+}
+
+function ErrorBlock({ text }: { text: string }) {
+  return (
+    <div
+      role="alert"
+      style={{
+        padding: 10,
+        borderRadius: 8,
+        background: C.terracottaSoft,
+        color: C.terracotta,
+        fontFamily: FONT_MONO,
+        fontSize: 11,
+        letterSpacing: 1.5,
+        textTransform: "uppercase",
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
+function formatHm(d: Date): string {
+  const h = String(d.getHours()).padStart(2, "0");
+  const m = String(d.getMinutes()).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+// ─── Tab "Productos" ─────────────────────────────────────────────────────────
+// Catálogo completo con métricas en el rango. Buscador (nombre/categoría),
+// orden por columna clickeable, paginado server-side. Sin filtro de
+// categoría — el operador lo pidió así.
+type ProductSort = "revenue" | "units" | "name" | "category";
+type SortDir = "asc" | "desc";
+
+function ProductsTab({
+  range,
+  liveTick,
+}: {
+  range: DateRange;
+  liveTick: boolean;
+}) {
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [sort, setSort] = useState<ProductSort>("revenue");
+  const [direction, setDirection] = useState<SortDir>("desc");
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(20);
+  const [includeInactive, setIncludeInactive] = useState(false);
+  const [data, setData] = useState<ProductMetricsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Debounce del buscador para no martillear el backend con cada tecla.
+  // 250ms es el dulce: rápido para sentirse responsive, suficiente para
+  // que una palabra completa entre como una sola query.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Reset paginación al cambiar filtros — si estabas en página 7 y
+  // buscás "águ", quedarte en la 7 sería confuso.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch, sort, direction, range, includeInactive]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await salesInsightsApi.getAllProducts({
+        ...rangeToParams(range),
+        search: debouncedSearch || undefined,
+        sort,
+        direction,
+        page,
+        page_size: pageSize,
+        include_inactive: includeInactive,
+      });
+      setData(res);
+    } catch (e) {
+      setError(getErrorMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [range, debouncedSearch, sort, direction, page, pageSize, includeInactive]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (liveTick) void load();
+  }, [liveTick, load]);
+
+  const onHeader = (col: ProductSort) => {
+    if (sort === col) {
+      setDirection((d) => (d === "desc" ? "asc" : "desc"));
+    } else {
+      setSort(col);
+      setDirection(col === "name" || col === "category" ? "asc" : "desc");
+    }
+  };
+
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Toolbar: buscador + toggle inactivos. */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Buscar por nombre o categoría..."
+          aria-label="Buscar producto"
+          style={{
+            flex: 1,
+            minWidth: 200,
+            padding: "10px 12px",
+            border: `1px solid ${C.sand}`,
+            borderRadius: 10,
+            background: C.paper,
+            color: C.ink,
+            fontFamily: FONT_UI,
+            fontSize: 13,
+            outline: "none",
+          }}
+        />
+        <label
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            fontFamily: FONT_MONO,
+            fontSize: 10,
+            color: C.cacao,
+            letterSpacing: 1.5,
+            textTransform: "uppercase",
+            fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={includeInactive}
+            onChange={(e) => setIncludeInactive(e.target.checked)}
+          />
+          Ver inactivos
+        </label>
+      </div>
+
+      {/* KPI strip mini: totales del rango (independientes del paginado). */}
+      {data && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+            gap: 10,
+          }}
+        >
+          <MiniStat
+            label="Productos visibles"
+            value={String(data.total)}
+            hint={`Página ${data.page} de ${totalPages}`}
+          />
+          <MiniStat label="Ingresos del rango" value={fmt(data.total_revenue)} />
+          <MiniStat
+            label="Unidades vendidas"
+            value={String(data.total_units)}
+          />
+        </div>
+      )}
+
+      {error && <ErrorBlock text={error} />}
+      {loading && !data && <LoadingBlock />}
+
+      {data && (
+        <Panel title="Catálogo">
+          {data.rows.length === 0 ? (
+            <Empty text="Sin resultados" />
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table
+                style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontFamily: FONT_UI,
+                  fontSize: 13,
+                  color: C.ink,
+                }}
+              >
+                <thead>
+                  <tr>
+                    <SortableTh
+                      label="Producto"
+                      col="name"
+                      sort={sort}
+                      direction={direction}
+                      onClick={onHeader}
+                      align="left"
+                    />
+                    <SortableTh
+                      label="Categoría"
+                      col="category"
+                      sort={sort}
+                      direction={direction}
+                      onClick={onHeader}
+                      align="left"
+                    />
+                    <SortableTh
+                      label="Unidades"
+                      col="units"
+                      sort={sort}
+                      direction={direction}
+                      onClick={onHeader}
+                      align="right"
+                    />
+                    <SortableTh
+                      label="Ingresos"
+                      col="revenue"
+                      sort={sort}
+                      direction={direction}
+                      onClick={onHeader}
+                      align="right"
+                    />
+                    <th
+                      style={{
+                        ...thBase(),
+                        textAlign: "right",
+                      }}
+                    >
+                      Tkt prom
+                    </th>
+                    <th
+                      style={{
+                        ...thBase(),
+                        textAlign: "right",
+                      }}
+                    >
+                      % total
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.rows.map((r) => (
+                    <ProductRow key={r.product_id} row={r} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Paginación. */}
+          {data.total > data.page_size && (
+            <div
+              style={{
+                marginTop: 12,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: FONT_MONO,
+                  fontSize: 10,
+                  color: C.mute,
+                  letterSpacing: 1.5,
+                  textTransform: "uppercase",
+                }}
+              >
+                Viendo {(data.page - 1) * data.page_size + 1}–
+                {Math.min(data.page * data.page_size, data.total)} de {data.total}
+              </span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button
+                  type="button"
+                  disabled={data.page <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  style={pagerBtn(data.page <= 1)}
+                >
+                  ← Anterior
+                </button>
+                <button
+                  type="button"
+                  disabled={data.page >= totalPages}
+                  onClick={() => setPage((p) => p + 1)}
+                  style={pagerBtn(data.page >= totalPages)}
+                >
+                  Siguiente →
+                </button>
+              </div>
+            </div>
+          )}
+        </Panel>
+      )}
+    </div>
+  );
+}
+
+function SortableTh({
+  label,
+  col,
+  sort,
+  direction,
+  onClick,
+  align,
+}: {
+  label: string;
+  col: ProductSort;
+  sort: ProductSort;
+  direction: SortDir;
+  onClick: (c: ProductSort) => void;
+  align: "left" | "right";
+}) {
+  const active = sort === col;
+  return (
+    <th
+      onClick={() => onClick(col)}
+      style={{
+        ...thBase(),
+        textAlign: align,
+        cursor: "pointer",
+        userSelect: "none",
+        color: active ? C.ink : C.mute,
+      }}
+    >
+      {label}
+      {active && (
+        <span style={{ marginLeft: 4, fontFamily: FONT_MONO }}>
+          {direction === "desc" ? "▼" : "▲"}
+        </span>
+      )}
+    </th>
+  );
+}
+
+function thBase(): React.CSSProperties {
+  return {
+    padding: "8px 10px",
+    borderBottom: `1px solid ${C.sand}`,
+    fontFamily: FONT_MONO,
+    fontSize: 9,
+    letterSpacing: 1.8,
+    color: C.mute,
+    textTransform: "uppercase",
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+  };
+}
+
+function ProductRow({ row }: { row: ProductMetricsRowApi }) {
+  return (
+    <tr
+      style={{
+        borderBottom: `1px solid ${C.sand}`,
+        opacity: row.is_active ? 1 : 0.55,
+      }}
+    >
+      <td style={{ padding: "8px 10px" }}>
+        <ProductLink productId={row.product_id}>
+          <span
+            style={{
+              fontFamily: FONT_DISPLAY,
+              fontSize: 15,
+              color: C.ink,
+              letterSpacing: 0.3,
+            }}
+          >
+            {row.name}
+          </span>
+          {!row.is_active && (
+            <span
+              style={{
+                fontFamily: FONT_MONO,
+                fontSize: 9,
+                color: C.mute,
+                letterSpacing: 1.5,
+                textTransform: "uppercase",
+                marginLeft: 6,
+              }}
+            >
+              · inactivo
+            </span>
+          )}
+        </ProductLink>
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          fontFamily: FONT_MONO,
+          fontSize: 10,
+          color: C.cacao,
+          letterSpacing: 1.2,
+          textTransform: "uppercase",
+        }}
+      >
+        {row.category}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          textAlign: "right",
+          fontFamily: FONT_UI,
+          color: row.units_sold > 0 ? C.ink : C.mute,
+        }}
+      >
+        {row.units_sold}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          textAlign: "right",
+          fontFamily: FONT_UI,
+          color: row.revenue > 0 ? C.gold : C.mute,
+          fontWeight: 600,
+        }}
+      >
+        {fmt(row.revenue)}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          textAlign: "right",
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          color: C.cacao,
+        }}
+      >
+        {row.avg_ticket > 0 ? fmt(row.avg_ticket) : "—"}
+      </td>
+      <td
+        style={{
+          padding: "8px 10px",
+          textAlign: "right",
+          fontFamily: FONT_MONO,
+          fontSize: 11,
+          color: row.revenue_pct > 0 ? C.cacao : C.mute,
+        }}
+      >
+        {row.revenue_pct > 0 ? `${row.revenue_pct.toFixed(1)}%` : "—"}
+      </td>
+    </tr>
+  );
+}
+
+function pagerBtn(disabled: boolean): React.CSSProperties {
+  return {
+    padding: "8px 14px",
+    border: `1px solid ${disabled ? C.sand : C.cacao}`,
+    background: disabled ? C.cream : C.paper,
+    color: disabled ? C.mute : C.ink,
+    fontFamily: FONT_MONO,
+    fontSize: 10,
+    letterSpacing: 1.5,
+    textTransform: "uppercase",
+    fontWeight: 700,
+    borderRadius: 999,
+    cursor: disabled ? "not-allowed" : "pointer",
+  };
 }

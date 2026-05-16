@@ -82,6 +82,83 @@ export type SalesInsights = {
   })[];
 };
 
+// ─── Cuentas cerradas con detalle (tab "Detalle" del admin) ─────────────
+export type ClosedSessionLine = {
+  consumption_id: number;
+  type: ConsumptionType;
+  description: string;
+  /** Cantidad nominal — refunds vienen con cantidad positiva pero amount negativo. */
+  quantity: number;
+  unit_amount: number;
+  amount: number;
+  /** Hora exacta del consumo (ISO). Útil para ordenar dentro de la cuenta. */
+  created_at: string;
+};
+
+export type ClosedSession = {
+  session_id: number;
+  table_id: number;
+  table_number: number | null;
+  table_kind: "TABLE" | "BAR";
+  custom_name: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  paid_at: string | null;
+  voided_at: string | null;
+  void_reason: string | null;
+  void_other_detail: string | null;
+  /** "paid" | "void" — derivado de paid_at vs voided_at para que el UI no recalcule. */
+  outcome: "paid" | "void";
+  /** Suma de productos vendidos (positivos). No incluye descuentos/refunds. */
+  subtotal: number;
+  /** Sumatoria de discount + adjustment + refund (negativos en su mayoría). */
+  adjustments_total: number;
+  /** Pagos parciales (anticipos, ya negativos en la BD). */
+  partial_payments_total: number;
+  /** Total final = lo que efectivamente cobró el bar. = total_consumption persistido. */
+  total: number;
+  /** Líneas del ledger, ordenadas por created_at ascendente. */
+  lines: ClosedSessionLine[];
+};
+
+export type ClosedSessionsResponse = {
+  range: { from: string; to: string; days: number };
+  /** Cantidad de cuentas (paid + void) que cayeron en el rango por closed_at. */
+  total: number;
+  paid_count: number;
+  void_count: number;
+  /** Total cobrado (solo paid). */
+  paid_revenue: number;
+  /** Total anulado (cuánta plata se perdió por voids). */
+  void_lost_revenue: number;
+  sessions: ClosedSession[];
+};
+
+// ─── Todos los productos con métricas (tab "Productos" del admin) ──────
+export type ProductMetricsRow = {
+  product_id: number;
+  name: string;
+  category: string;
+  is_active: boolean;
+  stock: number;
+  units_sold: number;
+  revenue: number;
+  avg_ticket: number;
+  /** Porcentaje sobre el total de ingresos del rango (0..100, redondeado a 2 dec). */
+  revenue_pct: number;
+};
+
+export type ProductMetricsResponse = {
+  range: { from: string; to: string; days: number };
+  total_revenue: number;
+  total_units: number;
+  /** Total de productos antes de paginar (post-filtro). Para mostrar "viendo 1–20 de 87". */
+  total: number;
+  page: number;
+  page_size: number;
+  rows: ProductMetricsRow[];
+};
+
 export type ProductSalesHistory = {
   product: {
     id: number;
@@ -538,6 +615,297 @@ export class SalesInsightsService {
       totals: { units: totalUnits, revenue: round(totalRevenue) },
     };
   }
+
+  /**
+   * Cuentas cerradas en el rango — pagadas + anuladas (void), con el
+   * detalle del ledger por cuenta. La vista "Detalle" del admin usa
+   * esto como su lista principal: una fila por cuenta, expandible.
+   *
+   * Decisiones:
+   *   - Filtramos por `closed_at` (no por `created_at` del consumption):
+   *     una cuenta abierta a las 23:55 y pagada a las 01:10 pertenece al
+   *     día siguiente desde la perspectiva del cierre. Es lo que el
+   *     operador espera al revisar "ventas del lunes".
+   *   - Devolvemos sesiones `paid` Y `void`. La UI las distingue con un
+   *     badge; el operador pidió ver anuladas.
+   *   - Las líneas vienen ordenadas por `created_at` para reconstruir la
+   *     secuencia real de cobros (como si fuera el ticket impreso).
+   *   - Sin paginación todavía: 1 día de bar lleno son ~80 cuentas; 30
+   *     días serían ~2400. Si en producción se vuelve pesado, agregamos
+   *     `page`/`page_size` aquí siguiendo el patrón del endpoint de
+   *     productos.
+   */
+  async getClosedSessions(opts: {
+    day?: string;
+    days?: number;
+    from?: string;
+    to?: string;
+  }): Promise<ClosedSessionsResponse> {
+    const { from, to, days } = this.resolveRangeOrCustom(opts);
+
+    const sessions = await this.prisma.tableSession.findMany({
+      where: {
+        OR: [
+          { paid_at: { not: null, gte: from, lt: to } },
+          { voided_at: { not: null, gte: from, lt: to } },
+        ],
+      },
+      orderBy: { closed_at: "desc" },
+      include: {
+        table: {
+          select: { id: true, number: true, kind: true },
+        },
+        consumptions: {
+          orderBy: { created_at: "asc" },
+          select: {
+            id: true,
+            type: true,
+            description: true,
+            quantity: true,
+            unit_amount: true,
+            amount: true,
+            created_at: true,
+          },
+        },
+      },
+    });
+
+    let paidCount = 0;
+    let voidCount = 0;
+    let paidRevenue = 0;
+    let voidLostRevenue = 0;
+    const result: ClosedSession[] = sessions.map((s) => {
+      const outcome: "paid" | "void" = s.voided_at ? "void" : "paid";
+      let subtotal = 0;
+      let adjustments = 0;
+      let partials = 0;
+      const lines: ClosedSessionLine[] = s.consumptions.map((c) => {
+        const amount = Number(c.amount);
+        switch (c.type) {
+          case ConsumptionType.product:
+            subtotal += amount;
+            break;
+          case ConsumptionType.discount:
+          case ConsumptionType.adjustment:
+          case ConsumptionType.refund:
+            adjustments += amount;
+            break;
+          case ConsumptionType.partial_payment:
+            partials += amount;
+            break;
+        }
+        return {
+          consumption_id: c.id,
+          type: c.type,
+          description: c.description,
+          quantity: c.quantity,
+          unit_amount: Number(c.unit_amount),
+          amount,
+          created_at: c.created_at.toISOString(),
+        };
+      });
+      const total = Number(s.total_consumption);
+      if (outcome === "paid") {
+        paidCount += 1;
+        paidRevenue += total;
+      } else {
+        voidCount += 1;
+        // Lo "perdido" en void = suma de productos (subtotal). Si el
+        // void cayó después de un refund parcial, el subtotal ya refleja
+        // las ventas vigentes y es el número que el operador querrá ver.
+        voidLostRevenue += subtotal;
+      }
+      return {
+        session_id: s.id,
+        table_id: s.table_id,
+        table_number: s.table?.number ?? null,
+        table_kind: (s.table?.kind ?? "TABLE") as "TABLE" | "BAR",
+        custom_name: s.custom_name,
+        opened_at: s.opened_at.toISOString(),
+        closed_at: s.closed_at ? s.closed_at.toISOString() : null,
+        paid_at: s.paid_at ? s.paid_at.toISOString() : null,
+        voided_at: s.voided_at ? s.voided_at.toISOString() : null,
+        void_reason: s.void_reason,
+        void_other_detail: s.void_other_detail,
+        outcome,
+        subtotal: round(subtotal),
+        adjustments_total: round(adjustments),
+        partial_payments_total: round(partials),
+        total: round(total),
+        lines,
+      };
+    });
+
+    return {
+      range: { from: from.toISOString(), to: to.toISOString(), days },
+      total: result.length,
+      paid_count: paidCount,
+      void_count: voidCount,
+      paid_revenue: round(paidRevenue),
+      void_lost_revenue: round(voidLostRevenue),
+      sessions: result,
+    };
+  }
+
+  /**
+   * Catálogo completo con métricas de ventas en el rango. Soporta:
+   *   - buscador por nombre/categoría (`search`)
+   *   - orden por revenue (default), units, name, category
+   *   - paginado server-side (page/page_size; defaults: 1, 20)
+   *
+   * Productos sin ventas en el rango aparecen con units=0/revenue=0; el
+   * operador los necesita para detectar SKUs muertos y para mostrar
+   * inventario que existe pero no se vende.
+   */
+  async getAllProductsMetrics(opts: {
+    day?: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    search?: string;
+    sort?: "revenue" | "units" | "name" | "category";
+    direction?: "asc" | "desc";
+    page?: number;
+    page_size?: number;
+    include_inactive?: boolean;
+  }): Promise<ProductMetricsResponse> {
+    const { from, to, days } = this.resolveRangeOrCustom(opts);
+
+    const sort = opts.sort ?? "revenue";
+    const direction = opts.direction ?? "desc";
+    const page = Math.max(1, Math.floor(opts.page ?? 1));
+    const pageSize = clampPageSize(opts.page_size ?? 20);
+    const search = opts.search?.trim().toLowerCase() ?? "";
+    const includeInactive = opts.include_inactive ?? false;
+
+    const consumptions = await this.prisma.consumption.findMany({
+      where: {
+        type: ConsumptionType.product,
+        product_id: { not: null },
+        reversed_at: null,
+        created_at: { gte: from, lt: to },
+      },
+      select: {
+        product_id: true,
+        quantity: true,
+        amount: true,
+        table_session_id: true,
+      },
+    });
+
+    const productAgg = new Map<
+      number,
+      { units: number; revenue: number; sessions: Set<number> }
+    >();
+    let totalRevenue = 0;
+    let totalUnits = 0;
+    for (const c of consumptions) {
+      if (c.product_id == null) continue;
+      const slot = productAgg.get(c.product_id) ?? {
+        units: 0,
+        revenue: 0,
+        sessions: new Set<number>(),
+      };
+      const amount = Number(c.amount);
+      slot.units += c.quantity;
+      slot.revenue += amount;
+      slot.sessions.add(c.table_session_id);
+      productAgg.set(c.product_id, slot);
+      totalRevenue += amount;
+      totalUnits += c.quantity;
+    }
+
+    const products = await this.prisma.product.findMany({
+      where: includeInactive ? {} : { is_active: true },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        is_active: true,
+        stock: true,
+      },
+    });
+
+    let rows: ProductMetricsRow[] = products.map((p) => {
+      const agg = productAgg.get(p.id);
+      const units = agg?.units ?? 0;
+      const revenue = round(agg?.revenue ?? 0);
+      const sessionsCount = agg?.sessions.size ?? 0;
+      return {
+        product_id: p.id,
+        name: p.name,
+        category: p.category,
+        is_active: p.is_active,
+        stock: p.stock,
+        units_sold: units,
+        revenue,
+        avg_ticket: sessionsCount > 0 ? round(revenue / sessionsCount) : 0,
+        revenue_pct:
+          totalRevenue > 0 ? round((revenue / totalRevenue) * 100) : 0,
+      };
+    });
+
+    if (search) {
+      rows = rows.filter(
+        (r) =>
+          r.name.toLowerCase().includes(search) ||
+          r.category.toLowerCase().includes(search),
+      );
+    }
+
+    rows.sort((a, b) => {
+      const mul = direction === "asc" ? 1 : -1;
+      switch (sort) {
+        case "units":
+          return (a.units_sold - b.units_sold) * mul;
+        case "name":
+          return a.name.localeCompare(b.name, "es") * mul;
+        case "category":
+          return a.category.localeCompare(b.category, "es") * mul;
+        case "revenue":
+        default:
+          return (a.revenue - b.revenue) * mul;
+      }
+    });
+
+    const total = rows.length;
+    const start = (page - 1) * pageSize;
+    const pageRows = rows.slice(start, start + pageSize);
+
+    return {
+      range: { from: from.toISOString(), to: to.toISOString(), days },
+      total_revenue: round(totalRevenue),
+      total_units: totalUnits,
+      total,
+      page,
+      page_size: pageSize,
+      rows: pageRows,
+    };
+  }
+
+  /**
+   * Resuelve from/to/days desde las opciones (day/days o from/to). DRY:
+   * lo usan getInsights, getClosedSessions y getAllProductsMetrics.
+   */
+  private resolveRangeOrCustom(opts: {
+    day?: string;
+    days?: number;
+    from?: string;
+    to?: string;
+  }): { from: Date; to: Date; days: number } {
+    if (opts.from || opts.to) {
+      if (!opts.from || !opts.to) {
+        throw new BadRequestException({
+          message: "Both `from` and `to` are required for custom ranges",
+          code: "SALES_INVALID_RANGE",
+        });
+      }
+      return resolveCustomRange(opts.from, opts.to);
+    }
+    const days = clampDays(opts.days ?? 1);
+    const range = resolveRange(opts.day, days);
+    return { from: range.from, to: range.to, days };
+  }
 }
 
 function clampDays(n: number): number {
@@ -563,6 +931,15 @@ function clampTopLimit(n: number): number {
   if (!Number.isFinite(n)) return 5;
   if (n < 1) return 1;
   if (n > 50) return 50;
+  return Math.floor(n);
+}
+
+function clampPageSize(n: number): number {
+  if (!Number.isFinite(n)) return 20;
+  if (n < 1) return 1;
+  // Tope alto: el operador a veces querrá ver "todos" en una página.
+  // 200 alcanza para catálogos típicos y mantiene el payload manejable.
+  if (n > 200) return 200;
   return Math.floor(n);
 }
 

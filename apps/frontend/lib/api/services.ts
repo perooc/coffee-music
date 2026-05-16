@@ -545,6 +545,75 @@ export type ProductSalesHistoryResponse = {
   totals: { units: number; revenue: number };
 };
 
+// ─── Tipos del tab "Detalle" (cuentas cerradas con detalle) ─────────────
+export type ClosedSessionLineApi = {
+  consumption_id: number;
+  type:
+    | "product"
+    | "adjustment"
+    | "discount"
+    | "refund"
+    | "partial_payment";
+  description: string;
+  quantity: number;
+  unit_amount: number;
+  amount: number;
+  created_at: string;
+};
+
+export type ClosedSessionApi = {
+  session_id: number;
+  table_id: number;
+  table_number: number | null;
+  table_kind: "TABLE" | "BAR";
+  custom_name: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  paid_at: string | null;
+  voided_at: string | null;
+  void_reason: string | null;
+  void_other_detail: string | null;
+  outcome: "paid" | "void";
+  subtotal: number;
+  adjustments_total: number;
+  partial_payments_total: number;
+  total: number;
+  lines: ClosedSessionLineApi[];
+};
+
+export type ClosedSessionsResponse = {
+  range: { from: string; to: string; days: number };
+  total: number;
+  paid_count: number;
+  void_count: number;
+  paid_revenue: number;
+  void_lost_revenue: number;
+  sessions: ClosedSessionApi[];
+};
+
+// ─── Tipos del tab "Productos" (catálogo completo con métricas) ─────────
+export type ProductMetricsRowApi = {
+  product_id: number;
+  name: string;
+  category: string;
+  is_active: boolean;
+  stock: number;
+  units_sold: number;
+  revenue: number;
+  avg_ticket: number;
+  revenue_pct: number;
+};
+
+export type ProductMetricsResponse = {
+  range: { from: string; to: string; days: number };
+  total_revenue: number;
+  total_units: number;
+  total: number;
+  page: number;
+  page_size: number;
+  rows: ProductMetricsRowApi[];
+};
+
 export const salesInsightsApi = {
   get: (params?: {
     day?: string;
@@ -584,6 +653,54 @@ export const salesInsightsApi = {
       .get<ProductSalesHistoryResponse>(
         `/admin/sales/products/${productId}/history${suffix}`,
       )
+      .then((r) => r.data);
+  },
+
+  /** Cuentas cerradas (pagadas + anuladas) en el rango. */
+  getClosedSessions: (params?: {
+    day?: string;
+    days?: number;
+    from?: string;
+    to?: string;
+  }): Promise<ClosedSessionsResponse> => {
+    const q = new URLSearchParams();
+    if (params?.day) q.set("day", params.day);
+    if (params?.days) q.set("days", String(params.days));
+    if (params?.from) q.set("from", params.from);
+    if (params?.to) q.set("to", params.to);
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return adminApi
+      .get<ClosedSessionsResponse>(`/admin/sales/sessions${suffix}`)
+      .then((r) => r.data);
+  },
+
+  /** Catálogo completo con métricas; soporta buscador, orden y paginado. */
+  getAllProducts: (params?: {
+    day?: string;
+    days?: number;
+    from?: string;
+    to?: string;
+    search?: string;
+    sort?: "revenue" | "units" | "name" | "category";
+    direction?: "asc" | "desc";
+    page?: number;
+    page_size?: number;
+    include_inactive?: boolean;
+  }): Promise<ProductMetricsResponse> => {
+    const q = new URLSearchParams();
+    if (params?.day) q.set("day", params.day);
+    if (params?.days) q.set("days", String(params.days));
+    if (params?.from) q.set("from", params.from);
+    if (params?.to) q.set("to", params.to);
+    if (params?.search) q.set("search", params.search);
+    if (params?.sort) q.set("sort", params.sort);
+    if (params?.direction) q.set("direction", params.direction);
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.page_size) q.set("page_size", String(params.page_size));
+    if (params?.include_inactive) q.set("include_inactive", "true");
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return adminApi
+      .get<ProductMetricsResponse>(`/admin/sales/products${suffix}`)
       .then((r) => r.data);
   },
 };

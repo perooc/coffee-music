@@ -138,9 +138,10 @@ export default function AdminProductsPage() {
   // Catalog, tendríamos que duplicarlo aquí o exponerlo via ref — peor.
   const filtered = useMemo(() => {
     let list = products;
-    // Tab "all" oculta inactivos por design (los inactivos viven en
-    // su propio tab para no contaminar la operación normal).
-    if (filter === "all") list = list.filter((p) => p.is_active);
+    // Tab "all" muestra todos los productos (activos e inactivos) — el
+    // operador pidió ver el catálogo entero en este tab. Los tabs
+    // "Activos" e "Inactivos" siguen siendo vistas específicas.
+    if (filter === "all") list = products;
     else if (filter === "active") list = list.filter((p) => p.is_active);
     else if (filter === "inactive") list = list.filter((p) => !p.is_active);
     else if (filter === "low_stock")
@@ -554,10 +555,7 @@ function CatalogFilters({
   onCategoryChange: (v: string | null) => void;
 }) {
   const counts = useMemo(() => {
-    // "Todos" oculta inactivos en el display (line 143), así que el
-    // contador también — si no, dice 30 y aparecen 27 sin explicación.
-    // Los inactivos viven en su propio tab.
-    const all = products.filter((p) => p.is_active).length;
+    const all = products.length;
     const active = products.filter((p) => p.is_active).length;
     const low = products.filter(
       (p) => p.is_active && (p.is_low_stock || p.is_out_of_stock),
