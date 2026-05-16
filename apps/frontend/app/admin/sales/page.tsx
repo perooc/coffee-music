@@ -71,6 +71,11 @@ function isValidTab(v: unknown): v is TabKey {
 export default function AdminSalesPage() {
   const [range, setRange] = useState<DateRange>(DEFAULT_RANGE);
   const [data, setData] = useState<SalesInsightsResponse | null>(null);
+  // Ingresos no operacionales del MISMO rango que `data`. Se muestran
+  // junto al KPI "Ingresos" del strip para que el operador vea ambos en
+  // paralelo. Comparable porque ambos son acumulados del rango (no estado
+  // instantáneo como el "Consumo hoy" del dashboard /admin).
+  const [extrasRevenue, setExtrasRevenue] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Persistimos la última pestaña en sessionStorage para que un refresh
@@ -103,8 +108,20 @@ export default function AdminSalesPage() {
           : range.from && range.to
             ? { from: range.from, to: range.to }
             : { days: range.days };
-      const res = await salesInsightsApi.get(params);
+      // Cargamos en paralelo insights + extras + maletas. Si los dos
+      // últimos fallan no rompemos la página principal — su error queda
+      // como `revenue=0`. La auditoría detallada vive en el tab Extras.
+      const extraParams = rangeToIsoBounds(range);
+      const [res, eSummary, lSummary] = await Promise.all([
+        salesInsightsApi.get(params),
+        extraIncomeApi.summary(extraParams).catch(() => null),
+        luggageApi.summary(extraParams).catch(() => null),
+      ]);
       setData(res);
+      setExtrasRevenue(
+        (eSummary?.restroom.total.revenue ?? 0) +
+          (lSummary?.luggage.revenue ?? 0),
+      );
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -114,6 +131,16 @@ export default function AdminSalesPage() {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  // Si el operador hace un cobro desde el ExtrasDock (flotante en /admin)
+  // mientras tiene esta pestaña abierta, el KPI Extras del strip se
+  // actualiza sin esperar al próximo socket event.
+  useEffect(() => {
+    const onExtrasChanged = () => void refresh();
+    window.addEventListener("crown:extras-changed", onExtrasChanged);
+    return () =>
+      window.removeEventListener("crown:extras-changed", onExtrasChanged);
   }, [refresh]);
 
   // Auto-refresh por socket: cuando llega un evento de venta-relacionada
@@ -265,6 +292,7 @@ export default function AdminSalesPage() {
             summary={data.summary}
             previous={data.previous_period}
             daily={data.daily_breakdown}
+            extrasRevenue={extrasRevenue}
             justRefreshed={liveJustRefreshed}
           />
 
@@ -782,11 +810,16 @@ function SalesKpiStrip({
   summary,
   previous,
   daily,
+  extrasRevenue,
   justRefreshed,
 }: {
   summary: SalesInsightsResponse["summary"];
   previous: SalesInsightsResponse["previous_period"];
   daily: SalesInsightsResponse["daily_breakdown"];
+  /** Total cobrado en baño + maletas del mismo rango. Acumulado, no
+   *  instantáneo. NO se compara contra previous_period porque el
+   *  backend no devuelve esa serie todavía. */
+  extrasRevenue: number;
   /** Se prende 1.2s después de un refresh por socket — pinta un dot
    *  pulsante para que el operador vea que el dashboard está vivo. */
   justRefreshed?: boolean;
@@ -869,6 +902,15 @@ function SalesKpiStrip({
         />
         <KpiCard
           index={1}
+          label="Extras"
+          value={fmt(extrasRevenue)}
+          tone="neutral"
+          current={extrasRevenue}
+          previous={extrasRevenue}
+          formatPrev={fmt}
+        />
+        <KpiCard
+          index={2}
           label="Tickets"
           value={String(summary.tickets_count)}
           tone="success"
@@ -877,7 +919,7 @@ function SalesKpiStrip({
           spark={daily.map((d) => d.tickets)}
         />
         <KpiCard
-          index={2}
+          index={3}
           label="Ticket promedio"
           value={summary.tickets_count > 0 ? fmt(summary.avg_ticket) : "—"}
           tone="neutral"
@@ -886,7 +928,7 @@ function SalesKpiStrip({
           formatPrev={fmt}
         />
         <KpiCard
-          index={3}
+          index={4}
           label="Unidades"
           value={String(summary.total_units)}
           tone="neutral"

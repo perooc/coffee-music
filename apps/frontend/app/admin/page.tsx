@@ -13,8 +13,6 @@ import {
   playbackApi,
   productsApi,
   musicApi,
-  extraIncomeApi,
-  luggageApi,
 } from "@/lib/api/services";
 import { getErrorMessage } from "@/lib/errors";
 import { useAdminAuth } from "@/lib/auth/auth-context";
@@ -1186,25 +1184,6 @@ export default function AdminPage() {
   // Catalog snapshot, used to resolve product names inside OrderRequest.items
   // (the JSON column on OrderRequest only stores product_id + quantity).
   const [products, setProducts] = useState<Product[]>([]);
-  // Ingresos no operacionales (baño + maletas) — el dashboard muestra un
-  // KPI separado al lado del "Consumo hoy". Por diseño NO se mezclan con
-  // el revenue de productos: son contabilidad distinta. Se actualiza con
-  // un refetch suave cuando el ExtrasDock dispara un evento custom — y
-  // como red de seguridad, un interval de 60s.
-  const [extrasRevenueToday, setExtrasRevenueToday] = useState(0);
-  const refreshExtrasRevenue = useCallback(async () => {
-    try {
-      const [e, l] = await Promise.all([
-        extraIncomeApi.summary(),
-        luggageApi.summary(),
-      ]);
-      setExtrasRevenueToday(
-        (e.restroom.total.revenue ?? 0) + (l.luggage.revenue ?? 0),
-      );
-    } catch (err) {
-      console.error("[admin] extras summary error", err);
-    }
-  }, []);
   // Lightweight in-page toast queue. Currently used only for customer
   // cancellations (the rest of the admin surface already has explicit UI
   // for state changes — adding toasts there would be noise).
@@ -1340,22 +1319,6 @@ export default function AdminPage() {
   });
 
   useEffect(() => {
-    void refreshExtrasRevenue();
-    // Cada minuto refrescamos extras como red de seguridad. El push
-    // inmediato viene del listener `crown:extras-changed` (más abajo).
-    const interval = setInterval(() => void refreshExtrasRevenue(), 60_000);
-    // CustomEvent emitido por ExtrasDock cuando hay un cobro nuevo o
-    // creación de maleta: refrescamos al instante para que el KPI suba
-    // sin esperar al próximo tick del interval.
-    const onExtrasChanged = () => void refreshExtrasRevenue();
-    window.addEventListener("crown:extras-changed", onExtrasChanged);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener("crown:extras-changed", onExtrasChanged);
-    };
-  }, [refreshExtrasRevenue]);
-
-  useEffect(() => {
     tablesApi.getAll().then(setAllTables).catch(console.error);
     queueApi.getGlobal().then(updateFromSocket).catch(console.error);
     ordersApi
@@ -1469,15 +1432,6 @@ export default function AdminPage() {
       numericValue: revenue,
       format: fmt,
       tone: "neutral",
-    },
-    // Ingresos no operacionales (baño + maletas pagadas hoy). Visual
-    // separado del consumo de bar para preservar la contabilidad.
-    {
-      label: "Extras hoy",
-      value: fmt(extrasRevenueToday),
-      numericValue: extrasRevenueToday,
-      format: fmt,
-      tone: "warm",
     },
   ];
 
